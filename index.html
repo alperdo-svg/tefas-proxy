@@ -8,6 +8,7 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style> body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; } </style>
 </head>
 <body>
@@ -70,6 +71,89 @@ const Info = (p) => <Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 16v-
 const PieChart = (p) => <Svg {...p}><path d="M21 15.5A9 9 0 1 1 8.5 3"/><path d="M21 12A9 9 0 0 0 12 3v9Z"/></Svg>;
 const Database = (p) => <Svg {...p}><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></Svg>;
 const ChevronDown = (p) => <Svg {...p}><path d="m6 9 6 6 6-6"/></Svg>;
+const BarChart3 = (p) => <Svg {...p}><path d="M3 3v18h18"/><path d="M8 17V9M13 17V5M18 17v-6"/></Svg>;
+const Download = (p) => <Svg {...p}><path d="M12 3v12M7 11l5 4 5-4M5 21h14"/></Svg>;
+const TrendingUp = (p) => <Svg {...p}><path d="M3 17l6-6 4 4 7-7"/><path d="M17 7h4v4"/></Svg>;
+
+/* ===== Getiri hesaplama yardımcıları ===== */
+const minusMonths = (iso, n) => { const d = new Date(iso); d.setMonth(d.getMonth() - n); return d.toISOString().slice(0, 10); };
+const minusDays = (iso, n) => { const d = new Date(iso); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+// hist ARTAN sıralı; tarihi <= target olan SON kayıt
+const priceOnOrBefore = (hist, target) => { let r = null; for (const h of hist) { if (h.date <= target) r = h; else break; } return r; };
+// tarihi >= target olan İLK kayıt
+const firstOnOrAfter = (hist, target) => { for (const h of hist) { if (h.date >= target) return h; } return null; };
+
+function computeReturns(hist) {
+  if (!hist || hist.length < 2) return null;
+  const latest = hist[hist.length - 1];
+  const prev = hist[hist.length - 2];
+  const year = latest.date.slice(0, 4);
+  const pct = (baseEntry) => {
+    if (!baseEntry || !baseEntry.value) return null;
+    return ((latest.value - baseEntry.value) / baseEntry.value) * 100;
+  };
+  return {
+    son: latest,
+    gunluk: pct(prev),
+    hafta: pct(priceOnOrBefore(hist, minusDays(latest.date, 7)) || hist[0]),
+    ay1: pct(priceOnOrBefore(hist, minusMonths(latest.date, 1)) || hist[0]),
+    ay3: pct(priceOnOrBefore(hist, minusMonths(latest.date, 3)) || hist[0]),
+    ay6: pct(priceOnOrBefore(hist, minusMonths(latest.date, 6)) || hist[0]),
+    ytd: pct(firstOnOrAfter(hist, `${year}-01-01`) || hist[0]),
+    yil1: pct(priceOnOrBefore(hist, minusMonths(latest.date, 12)) || hist[0]),
+  };
+}
+
+function filterByPeriod(hist, period) {
+  if (!hist || !hist.length) return [];
+  const latest = hist[hist.length - 1];
+  let cutoff;
+  if (period === 'w') cutoff = minusDays(latest.date, 7);
+  else if (period === 'm') cutoff = minusMonths(latest.date, 1);
+  else if (period === '3m') cutoff = minusMonths(latest.date, 3);
+  else if (period === '6m') cutoff = minusMonths(latest.date, 6);
+  else if (period === 'ytd') cutoff = `${latest.date.slice(0, 4)}-01-01`;
+  else cutoff = minusMonths(latest.date, 12); // 1y
+  return hist.filter((h) => h.date >= cutoff);
+}
+
+/* ===== Basit SVG fiyat grafiği (dış kütüphane yok) ===== */
+function PriceChart({ data }) {
+  if (!data || data.length < 2) return <div className="text-sm text-slate-400 italic py-16 text-center">Grafik için yeterli veri yok.</div>;
+  const W = 820, H = 320, padL = 64, padR = 18, padT = 18, padB = 38;
+  const vals = data.map((d) => d.value);
+  let min = Math.min(...vals), max = Math.max(...vals);
+  if (min === max) { min *= 0.999; max *= 1.001; }
+  const xAt = (i) => padL + (W - padL - padR) * (data.length === 1 ? 0 : i / (data.length - 1));
+  const yAt = (v) => padT + (H - padT - padB) * (1 - (v - min) / (max - min));
+  const pts = data.map((d, i) => `${xAt(i).toFixed(1)},${yAt(d.value).toFixed(1)}`).join(' ');
+  const area = `${xAt(0).toFixed(1)},${H - padB} ${pts} ${xAt(data.length - 1).toFixed(1)},${H - padB}`;
+  const up = data[data.length - 1].value >= data[0].value;
+  const stroke = up ? '#059669' : '#e11d48';
+  const fill = up ? 'rgba(5,150,105,0.10)' : 'rgba(225,29,72,0.10)';
+  const fmtN = (v) => v.toLocaleString('tr-TR', { maximumFractionDigits: 4 });
+  const fmtD = (s) => new Date(s).toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+  const yTicks = [max, (max + min) / 2, min];
+  const xIdx = [0, Math.floor((data.length - 1) / 2), data.length - 1];
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
+      {yTicks.map((v, i) => {
+        const y = yAt(v);
+        return (
+          <g key={i}>
+            <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="#e2e8f0" strokeWidth="1" />
+            <text x={padL - 8} y={y + 4} textAnchor="end" fontSize="11" fill="#94a3b8">{fmtN(v)}</text>
+          </g>
+        );
+      })}
+      <polygon points={area} fill={fill} />
+      <polyline points={pts} fill="none" stroke={stroke} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      {xIdx.map((i, k) => (
+        <text key={k} x={xAt(i)} y={H - padB + 22} textAnchor={k === 0 ? 'start' : k === xIdx.length - 1 ? 'end' : 'middle'} fontSize="11" fill="#94a3b8">{fmtD(data[i].date)}</text>
+      ))}
+    </svg>
+  );
+}
 
 const SEED_FUNDS = [{ code: 'GAL', name: 'GARANTİ PORTFÖY İKİNCİ PARA PİYASASI (TL) FONU' }];
 
@@ -109,6 +193,8 @@ function App() {
   const [editingPrice, setEditingPrice] = useState(null);
   const [tempPrice, setTempPrice] = useState('');
   const [historyViewFund, setHistoryViewFund] = useState('');
+  const [reportFund, setReportFund] = useState('');
+  const [reportPeriod, setReportPeriod] = useState('1y');
   const [modalConfig, setModalConfig] = useState({ isOpen: false, title: '', message: '', onConfirm: null, isAlert: true });
   const [isFetching, setIsFetching] = useState(false);
 
@@ -239,6 +325,44 @@ function App() {
 
   const selectedHistory = historyViewFund && priceHistory[historyViewFund] ? [...priceHistory[historyViewFund]].sort((a, b) => b.date.localeCompare(a.date)) : [];
 
+  // --- Rapor verileri ---
+  const reportHist = reportFund && priceHistory[reportFund] ? [...priceHistory[reportFund]].sort((a, b) => a.date.localeCompare(b.date)) : [];
+  const reportReturns = useMemo(() => computeReturns(reportHist), [reportFund, priceHistory]);
+  const reportChartData = useMemo(() => filterByPeriod(reportHist, reportPeriod), [reportFund, reportPeriod, priceHistory]);
+  const reportFundName = (definedFunds.find((f) => f.code === reportFund) || {}).name || '';
+
+  const exportExcel = () => {
+    if (!reportFund || reportHist.length === 0) { showAlert('Veri Yok', 'Önce bir fon seçin ve fiyat geçmişi çekin.'); return; }
+    const rows = [['Tarih', 'Fiyat (TL)', 'Günlük Getiri (%)']];
+    reportHist.forEach((r, i) => {
+      const prev = reportHist[i - 1];
+      const chg = prev && prev.value ? ((r.value - prev.value) / prev.value) * 100 : '';
+      rows.push([r.date, r.value, chg === '' ? '' : Number(chg.toFixed(4))]);
+    });
+    const fname = `${reportFund}_fiyat_gecmisi.xlsx`;
+    try {
+      if (window.XLSX) {
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        ws['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 16 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, reportFund.slice(0, 28));
+        XLSX.writeFile(wb, fname);
+      } else {
+        // SheetJS yüklenmediyse CSV'ye düş (Excel açar)
+        const csv = rows.map((r) => r.join(';')).join('\n');
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fname.replace('.xlsx', '.csv');
+        a.click();
+      }
+    } catch (e) {
+      showAlert('Hata', 'Dışa aktarma sırasında bir sorun oluştu.');
+    }
+  };
+
+  const fmtPct = (v) => (v == null ? '-' : `${v > 0 ? '+' : ''}${v.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}%`);
+
   return (
     <div className="min-h-screen bg-[#f3f4f6] text-slate-800 pb-12">
       <header className="bg-[#1e1b4b] text-white border-b border-indigo-900 shadow-md sticky top-0 z-10">
@@ -248,7 +372,7 @@ function App() {
             <p className="text-xs text-indigo-200 mt-1 opacity-80">Yatırım Fonu Getiri ve Takip Sistemi</p>
           </div>
           <nav className="flex gap-2">
-            {[['portfolio', 'Portföyüm', Wallet], ['add', 'Yeni Fon Ekle', PlusCircle], ['history', 'Geçmiş Defteri', History]].map(([id, label, Ico]) => (
+            {[['portfolio', 'Portföyüm', Wallet], ['report', 'Fon Raporu', BarChart3], ['add', 'Yeni Fon Ekle', PlusCircle], ['history', 'Geçmiş Defteri', History]].map(([id, label, Ico]) => (
               <button key={id} onClick={() => setActiveTab(id)} className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTab === id ? 'bg-indigo-600 text-white shadow-lg' : 'bg-indigo-950 text-indigo-200 hover:bg-indigo-900'}`}><Ico size={18} /> {label}</button>
             ))}
           </nav>
@@ -438,6 +562,83 @@ function App() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'report' && (
+          <div>
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6">
+              <div className="flex flex-col md:flex-row md:items-end gap-4 justify-between">
+                <div className="flex-1 w-full">
+                  <div className="flex items-center gap-2 mb-3"><BarChart3 size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Fon Raporu</h2></div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Rapor için fon seçin</label>
+                  <select className="w-full md:max-w-md border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={reportFund} onChange={(e) => setReportFund(e.target.value)}>
+                    <option value="">Fon seçiniz...</option>
+                    {definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 40 ? f.name.slice(0, 40) + '...' : f.name} ({priceHistory[f.code] ? priceHistory[f.code].length : 0} kayıt)</option>)}
+                  </select>
+                </div>
+                {reportFund && reportHist.length > 0 && (
+                  <button onClick={exportExcel} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-5 rounded-xl shadow-sm flex items-center justify-center gap-2 whitespace-nowrap"><Download size={18} /> Excel'e Aktar</button>
+                )}
+              </div>
+            </div>
+
+            {!reportFund ? (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-16 text-center text-slate-400">
+                Yukarıdan bir fon seçin. Seçtiğiniz fonun fiyat grafiği ve dönemsel getirileri burada görünür.
+                <div className="text-xs mt-2">İpucu: Veri yoksa önce "Portföyüm" sekmesinden <strong>TEFAS Canlı Veri Çek</strong> ile fiyatları çekin.</div>
+              </div>
+            ) : reportHist.length < 2 ? (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-16 text-center text-slate-400">
+                Bu fon için yeterli fiyat verisi yok. "Portföyüm" sekmesinden <strong>TEFAS Canlı Veri Çek</strong>'e basın.
+              </div>
+            ) : (
+              <>
+                {/* Üst bilgi şeridi */}
+                <div className="bg-[#1e1b4b] rounded-2xl p-5 mb-6 text-white shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <div className="text-2xl font-extrabold tracking-wide">{reportFund}</div>
+                    <div className="text-xs text-indigo-200 max-w-md">{reportFundName}</div>
+                  </div>
+                  <div className="flex gap-6">
+                    <div className="text-right">
+                      <div className="text-xs text-indigo-300 uppercase font-bold">Son Fiyat</div>
+                      <div className="text-xl font-bold">{fmtPrice(reportReturns.son.value)}</div>
+                      <div className="text-[11px] text-indigo-300">{new Date(reportReturns.son.date).toLocaleDateString('tr-TR')}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs text-indigo-300 uppercase font-bold">Günlük Getiri</div>
+                      <div className={`text-xl font-bold ${reportReturns.gunluk >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{fmtPct(reportReturns.gunluk)}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Grafik */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6">
+                  <div className="flex items-center gap-2 mb-4"><TrendingUp size={18} className="text-indigo-500" /><h3 className="text-lg font-bold text-slate-800">Fon Fiyat Grafiği</h3></div>
+                  <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded-xl mb-5 w-fit">
+                    {[['w', 'Haftalık'], ['m', 'Aylık'], ['3m', '3 Aylık'], ['6m', '6 Aylık'], ['ytd', 'Yılbaşından'], ['1y', '1 Yıllık']].map(([p, label]) => (
+                      <button key={p} onClick={() => setReportPeriod(p)} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${reportPeriod === p ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>
+                    ))}
+                  </div>
+                  <PriceChart data={reportChartData} />
+                </div>
+
+                {/* Getiri bilgisi kartları */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                  <h3 className="text-lg font-bold text-slate-800 mb-4">Getiri Bilgisi</h3>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                    {[['Son 1 Hafta', reportReturns.hafta], ['Son 1 Ay', reportReturns.ay1], ['Son 3 Ay', reportReturns.ay3], ['Son 6 Ay', reportReturns.ay6], ['Yılbaşından', reportReturns.ytd], ['Son 1 Yıl', reportReturns.yil1]].map(([label, val], i) => (
+                      <div key={i} className="border border-slate-100 rounded-xl p-4 bg-slate-50/50">
+                        <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">{label}</div>
+                        <div className={`text-lg font-bold ${val == null ? 'text-slate-400' : val >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct(val)}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-4 border-l-2 border-indigo-200 pl-2">Getiriler, panelin kayıtlı fiyat geçmişinden hesaplanır. Daha uzun/eksiksiz geçmiş için "TEFAS Canlı Veri Çek" butonunu kullanın. "Excel'e Aktar" tüm günlük kayıtları indirir.</p>
+                </div>
+              </>
+            )}
           </div>
         )}
 
