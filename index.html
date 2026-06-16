@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fon Getiri Paneli</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style> body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; } </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect } = React;
+
+/* ===== Proxy: aynı Vercel projesinde /api/tefas olduğu için göreli adres ===== */
+const CUSTOM_PROXY = '/api/tefas';
+const PERIYOD = 12;
+
+function parseTefasResult(data) {
+  const list = data && Array.isArray(data.resultList) ? data.resultList : [];
+  if (!list.length) return null;
+  const history = list
+    .map((x) => ({ date: String(x.tarih).slice(0, 10), price: Number(x.fiyat) }))
+    .filter((h) => h.date && h.price > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (!history.length) return null;
+  const latest = history[history.length - 1];
+  return { price: latest.price, date: latest.date, name: (list[0] && list[0].fonUnvan) || null, history };
+}
+
+async function fetchTefasFund(code) {
+  try {
+    const base = CUSTOM_PROXY.replace(/\/+$/, '');
+    const sep = base.includes('?') ? '&' : '?';
+    const res = await fetch(`${base}${sep}fon=${encodeURIComponent(code)}&periyod=${PERIYOD}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    if (d && Number(d.price) > 0) {
+      const history = Array.isArray(d.history) && d.history.length
+        ? d.history.map((h) => ({ date: h.date, price: Number(h.price) })).filter((h) => h.price > 0)
+        : [{ date: d.date, price: Number(d.price) }];
+      return { price: Number(d.price), date: d.date, name: d.name || null, history };
+    }
+  } catch (e) { /* yut */ }
+  return null;
+}
+
+/* ===== Kalıcı depo: localStorage ===== */
+const load = (k, fb) => { try { const v = localStorage.getItem('fgp_' + k); return v ? JSON.parse(v) : fb; } catch { return fb; } };
+const save = (k, v) => { try { localStorage.setItem('fgp_' + k, JSON.stringify(v)); } catch {} };
+
+/* ===== İkonlar (lucide tarzı basit SVG) ===== */
+const Svg = ({ size = 18, className = '', children }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg>
+);
+const Wallet = (p) => <Svg {...p}><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M16 12h.01"/></Svg>;
+const PlusCircle = (p) => <Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></Svg>;
+const History = (p) => <Svg {...p}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></Svg>;
+const Edit2 = (p) => <Svg {...p}><path d="M17 3a2.8 2.8 0 0 1 4 4L7.5 20.5 3 22l1.5-4.5Z"/></Svg>;
+const Check = (p) => <Svg {...p}><path d="M20 6 9 17l-5-5"/></Svg>;
+const ArrowDownToLine = (p) => <Svg {...p}><path d="M12 3v12M7 11l5 4 5-4M5 21h14"/></Svg>;
+const ArrowUpFromLine = (p) => <Svg {...p}><path d="M12 21V9M7 13l5-4 5 4M5 3h14"/></Svg>;
+const RefreshCw = (p) => <Svg {...p}><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></Svg>;
+const Trash2 = (p) => <Svg {...p}><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></Svg>;
+const Info = (p) => <Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></Svg>;
+const PieChart = (p) => <Svg {...p}><path d="M21 15.5A9 9 0 1 1 8.5 3"/><path d="M21 12A9 9 0 0 0 12 3v9Z"/></Svg>;
+const Database = (p) => <Svg {...p}><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></Svg>;
+const ChevronDown = (p) => <Svg {...p}><path d="m6 9 6 6 6-6"/></Svg>;
+
+const SEED_FUNDS = [{ code: 'GAL', name: 'GARANTİ PORTFÖY İKİNCİ PARA PİYASASI (TL) FONU' }];
+
+function App() {
+  const [activeTab, setActiveTab] = useState('portfolio');
+  const [transactions, setTransactions] = useState(() => load('transactions', []));
+  const [definedFunds, setDefinedFunds] = useState(() => load('definedFunds', SEED_FUNDS));
+  const [priceHistory, setPriceHistory] = useState(() => load('priceHistory', {}));
+
+  useEffect(() => save('transactions', transactions), [transactions]);
+  useEffect(() => save('definedFunds', definedFunds), [definedFunds]);
+  useEffect(() => save('priceHistory', priceHistory), [priceHistory]);
+
+  const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+
+  const marketPrices = useMemo(() => {
+    const m = {};
+    Object.entries(priceHistory).forEach(([code, arr]) => {
+      if (arr && arr.length) {
+        const latest = [...arr].sort((a, b) => b.date.localeCompare(a.date))[0];
+        m[code] = { value: latest.value, date: latest.date };
+      }
+    });
+    return m;
+  }, [priceHistory]);
+
+  const [newFundCode, setNewFundCode] = useState('');
+  const [newFundName, setNewFundName] = useState('');
+  const [txType, setTxType] = useState('buy');
+  const [fundCode, setFundCode] = useState('');
+  const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
+  const [txPrice, setTxPrice] = useState('');
+  const [txTotalAmount, setTxTotalAmount] = useState('');
+  const [priceUpdateFund, setPriceUpdateFund] = useState('');
+  const [priceUpdateDate, setPriceUpdateDate] = useState(new Date().toISOString().split('T')[0]);
+  const [priceUpdateValue, setPriceUpdateValue] = useState('');
+  const [editingPrice, setEditingPrice] = useState(null);
+  const [tempPrice, setTempPrice] = useState('');
+  const [historyViewFund, setHistoryViewFund] = useState('');
+  const [modalConfig, setModalConfig] = useState({ isOpen: false, title: '', message: '', onConfirm: null, isAlert: true });
+  const [isFetching, setIsFetching] = useState(false);
+
+  const showAlert = (title, message) => setModalConfig({ isOpen: true, title, message, onConfirm: null, isAlert: true });
+  const showConfirm = (title, message, onConfirm) => setModalConfig({ isOpen: true, title, message, onConfirm, isAlert: false });
+
+  const calculatedQty = useMemo(() => {
+    const p = parseFloat(txPrice), t = parseFloat(txTotalAmount);
+    if (!isNaN(p) && !isNaN(t) && p > 0) return (t / p).toFixed(6);
+    return '0.000000';
+  }, [txPrice, txTotalAmount]);
+
+  const portfolio = useMemo(() => {
+    const holdings = {};
+    transactions.forEach((t) => {
+      if (!holdings[t.fundCode]) holdings[t.fundCode] = { code: t.fundCode, quantity: 0, totalCost: 0 };
+      const h = holdings[t.fundCode];
+      const qty = parseFloat(t.quantity), prc = parseFloat(t.price);
+      if (t.type === 'buy') { h.quantity += qty; h.totalCost += qty * prc; }
+      else if (t.type === 'sell') { const avgCost = h.quantity > 0 ? h.totalCost / h.quantity : 0; h.quantity -= qty; h.totalCost -= qty * avgCost; }
+    });
+    return Object.values(holdings).filter((h) => h.quantity > 0.001).map((h) => {
+      const avgCost = h.totalCost / h.quantity;
+      const marketData = marketPrices[h.code] || { value: avgCost, date: null };
+      const currentValue = h.quantity * marketData.value;
+      const profitLoss = currentValue - h.totalCost;
+      const fundDetails = definedFunds.find((f) => f.code === h.code);
+      return { ...h, name: fundDetails ? fundDetails.name : '', avgCost, currentPrice: marketData.value, priceDate: marketData.date, currentValue, profitLoss, profitLossPercent: h.totalCost > 0 ? (profitLoss / h.totalCost) * 100 : 0 };
+    });
+  }, [transactions, marketPrices, definedFunds]);
+
+  const summary = useMemo(() => {
+    let totalValue = 0, totalCost = 0;
+    portfolio.forEach((i) => { totalValue += i.currentValue; totalCost += i.totalCost; });
+    const netProfit = totalValue - totalCost;
+    return { totalValue, totalCost, netProfit, netProfitPercent: totalCost > 0 ? (netProfit / totalCost) * 100 : 0 };
+  }, [portfolio]);
+
+  const handleAddTransaction = (e) => {
+    e.preventDefault();
+    if (!fundCode || !txPrice || !txTotalAmount) { showAlert('Eksik Bilgi', 'Lütfen Fon, Fiyat ve Tutar alanlarını doldurun.'); return; }
+    const qty = parseFloat(calculatedQty);
+    if (qty <= 0) { showAlert('Geçersiz Değer', 'Hesaplanan adet sıfırdan büyük olmalıdır.'); return; }
+    if (txType === 'sell') {
+      const owned = (portfolio.find((p) => p.code === fundCode) || {}).quantity || 0;
+      if (qty > owned + 1e-6) { showAlert('Yetersiz Bakiye', `Elinizde ${fundCode} fonundan yalnızca ${owned.toFixed(6)} adet var.`); return; }
+    }
+    setTransactions((prev) => [...prev, { id: newId(), type: txType, fundCode, quantity: qty, price: parseFloat(txPrice), totalAmount: parseFloat(txTotalAmount), date: txDate, createdAt: Date.now() }]);
+    setFundCode(''); setTxPrice(''); setTxTotalAmount('');
+  };
+
+  const handleAddDefinedFund = (e) => {
+    e.preventDefault();
+    const code = newFundCode.toUpperCase(), name = newFundName.toUpperCase();
+    if (code && name && !definedFunds.find((f) => f.code === code)) {
+      setDefinedFunds((prev) => [...prev, { code, name }]); setNewFundCode(''); setNewFundName('');
+      showAlert('Başarılı', `${code} fonu listeye eklendi!`);
+    } else if (definedFunds.find((f) => f.code === code)) showAlert('Hata', 'Bu fon kodu zaten tanımlı!');
+  };
+
+  const handleDeleteDefinedFund = (code) => {
+    if (transactions.some((t) => t.fundCode === code)) { showAlert('İşlem Engellendi', 'Bu fona ait işlem kayıtları var. Önce "Geçmiş Defteri"nden o işlemleri silin.'); return; }
+    showConfirm('Fonu Sil', `${code} kodlu fonu silmek istediğinize emin misiniz? (Fiyat geçmişi korunur.)`, () => { setDefinedFunds((prev) => prev.filter((f) => f.code !== code)); setModalConfig({ isOpen: false }); });
+  };
+
+  const addPriceRecords = (code, records) => {
+    setPriceHistory((prev) => {
+      const byDate = new Map((prev[code] || []).map((r) => [r.date, r.value]));
+      records.forEach((r) => { if (r && r.value > 0 && r.date) byDate.set(r.date, r.value); });
+      return { ...prev, [code]: Array.from(byDate, ([date, value]) => ({ date, value })).sort((a, b) => a.date.localeCompare(b.date)) };
+    });
+  };
+
+  const handleDailyPriceUpdate = (e) => {
+    e.preventDefault();
+    if (!priceUpdateFund || !priceUpdateValue) return;
+    addPriceRecords(priceUpdateFund, [{ date: priceUpdateDate, value: parseFloat(priceUpdateValue) }]);
+    setPriceUpdateValue('');
+    showAlert('Fiyat Kaydedildi', `${priceUpdateFund} fonu ${priceUpdateDate} tarihli fiyatıyla geçmişe eklendi!`);
+  };
+
+  const handleTablePriceUpdate = (code) => {
+    const val = parseFloat(tempPrice);
+    if (!isNaN(val) && val > 0) addPriceRecords(code, [{ date: new Date().toISOString().split('T')[0], value: val }]);
+    setEditingPrice(null);
+  };
+
+  const handleAutoFetch = async () => {
+    if (definedFunds.length === 0) { showAlert('Bilgi', 'Tanımlı fon yok.'); return; }
+    setIsFetching(true);
+    const today = new Date().toISOString().split('T')[0];
+    const histUpdates = {}, nameUpdates = {}, failed = []; let updated = 0;
+    for (const fund of definedFunds) {
+      try {
+        const r = await fetchTefasFund(fund.code);
+        if (r && r.price > 0) {
+          histUpdates[fund.code] = (r.history && r.history.length ? r.history.map((h) => ({ date: h.date, value: h.price })) : [{ date: r.date || today, value: r.price }]);
+          if (r.name) nameUpdates[fund.code] = r.name;
+          updated++;
+        } else failed.push(fund.code);
+      } catch (err) { failed.push(fund.code); }
+    }
+    if (Object.keys(histUpdates).length) {
+      setPriceHistory((prev) => {
+        const next = { ...prev };
+        Object.entries(histUpdates).forEach(([code, recs]) => {
+          const byDate = new Map((next[code] || []).map((x) => [x.date, x.value]));
+          recs.forEach((x) => { if (x.value > 0 && x.date) byDate.set(x.date, x.value); });
+          next[code] = Array.from(byDate, ([date, value]) => ({ date, value })).sort((a, b) => a.date.localeCompare(b.date));
+        });
+        return next;
+      });
+    }
+    if (Object.keys(nameUpdates).length) setDefinedFunds((prev) => prev.map((f) => (nameUpdates[f.code] ? { ...f, name: nameUpdates[f.code] } : f)));
+    setIsFetching(false);
+    if (updated === 0) showAlert('Veri Çekilemedi', `Hiçbir fon güncellenemedi (${failed.join(', ')}). Fon kodlarını kontrol edin; TEFAS dakikada ~6 istek sınırı koyuyor, birkaç saniye sonra tekrar deneyin.`);
+    else if (failed.length) showAlert('Kısmi Güncelleme', `${updated} fon güncellendi. Çekilemeyenler: ${failed.join(', ')}.`);
+    else showAlert('Başarılı!', `Tüm fonların (${updated} adet) fiyatları TEFAS'tan çekildi ve geçmişe eklendi!`);
+  };
+
+  const handleDeleteTransaction = (id) => {
+    showConfirm('İşlemi Sil', 'Bu işlemi silmek istediğinize emin misiniz? (Fiyat geçmişi etkilenmez.)', () => { setTransactions((prev) => prev.filter((t) => t.id !== id)); setModalConfig({ isOpen: false }); });
+  };
+
+  const fmtCur = (v) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(v);
+  const fmtPrice = (v) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY', minimumFractionDigits: 6, maximumFractionDigits: 6 }).format(v);
+  const fmtQty = (v) => new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 6 }).format(v);
+
+  const selectedHistory = historyViewFund && priceHistory[historyViewFund] ? [...priceHistory[historyViewFund]].sort((a, b) => b.date.localeCompare(a.date)) : [];
+
+  return (
+    <div className="min-h-screen bg-[#f3f4f6] text-slate-800 pb-12">
+      <header className="bg-[#1e1b4b] text-white border-b border-indigo-900 shadow-md sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4 h-20 flex items-center justify-between">
+          <div className="flex flex-col">
+            <div className="flex items-center gap-2"><PieChart size={28} className="text-indigo-400" /><h1 className="text-2xl font-bold tracking-wide">Fon Getiri Paneli</h1></div>
+            <p className="text-xs text-indigo-200 mt-1 opacity-80">Yatırım Fonu Getiri ve Takip Sistemi</p>
+          </div>
+          <nav className="flex gap-2">
+            {[['portfolio', 'Portföyüm', Wallet], ['add', 'Yeni Fon Ekle', PlusCircle], ['history', 'Geçmiş Defteri', History]].map(([id, label, Ico]) => (
+              <button key={id} onClick={() => setActiveTab(id)} className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTab === id ? 'bg-indigo-600 text-white shadow-lg' : 'bg-indigo-950 text-indigo-200 hover:bg-indigo-900'}`}><Ico size={18} /> {label}</button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 py-8">
+        {activeTab === 'portfolio' && (
+          <div className="flex flex-col lg:flex-row gap-6">
+            <div className="w-full lg:w-1/3">
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                <h2 className="text-sm font-bold text-slate-400 tracking-wider mb-4 uppercase">Fonlarım</h2>
+                <div className="flex p-1 bg-slate-100 rounded-xl mb-6">
+                  <button onClick={() => setTxType('buy')} className={`flex-1 py-2 text-sm font-semibold rounded-lg flex justify-center items-center gap-2 ${txType === 'buy' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500'}`}><ArrowDownToLine size={16} /> Fon Alış</button>
+                  <button onClick={() => setTxType('sell')} className={`flex-1 py-2 text-sm font-semibold rounded-lg flex justify-center items-center gap-2 ${txType === 'sell' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-500'}`}><ArrowUpFromLine size={16} /> Fon Satış</button>
+                </div>
+                <form onSubmit={handleAddTransaction} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fon Seçimi</label>
+                    <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={fundCode} onChange={(e) => setFundCode(e.target.value)} required>
+                      <option value="">İşlem Yapılacak Fonu Seçiniz...</option>
+                      {definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 30 ? f.name.slice(0, 30) + '...' : f.name}</option>)}
+                    </select>
+                  </div>
+                  <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">İşlem Tarihi</label><input type="date" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txDate} onChange={(e) => setTxDate(e.target.value)} required /></div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fiyat (₺/Pay)</label><input type="number" step="any" placeholder="0.000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Yatırılan Tutar (₺)' : 'Satış Tutarı (₺)'}</label><input type="number" step="any" placeholder="0.00" className={`w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium ${txType === 'buy' ? 'text-indigo-700' : 'text-rose-700'}`} value={txTotalAmount} onChange={(e) => setTxTotalAmount(e.target.value)} required /></div>
+                  </div>
+                  <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Alınan' : 'Satılan'} Adet (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{calculatedQty}</span><span className="text-slate-400 text-xs">Adet</span></div></div>
+                  <button type="submit" className={`w-full font-bold py-3.5 px-6 rounded-xl shadow-sm flex justify-center items-center gap-2 mt-4 text-white ${txType === 'buy' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}><PlusCircle size={20} />{txType === 'buy' ? 'Alışı Ekle' : 'Satışı Ekle'}</button>
+                </form>
+              </div>
+            </div>
+
+            <div className="w-full lg:w-2/3 flex flex-col gap-6">
+              <div className="bg-[#2a2c41] rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between text-white shadow-md">
+                <div className="mb-4 sm:mb-0">
+                  <h2 className="text-xs font-bold text-slate-400 tracking-wider uppercase mb-1">Portföy Toplamı</h2>
+                  <div className="flex items-center gap-6 mt-2">
+                    <div><p className="text-xs text-slate-300">Yatırılan</p><p className="font-semibold">{fmtCur(summary.totalCost)}</p></div>
+                    <div><p className="text-xs text-slate-300">Güncel Değer</p><p className="font-semibold">{fmtCur(summary.totalValue)}</p></div>
+                  </div>
+                </div>
+                <div className="bg-white/10 px-6 py-3 rounded-xl border border-white/10 text-right min-w-[140px]">
+                  <p className="text-xs text-slate-300 uppercase font-bold tracking-wider mb-1">Net Kâr</p>
+                  <p className={`text-xl font-bold ${summary.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{summary.netProfit > 0 ? '+' : ''}{fmtCur(summary.netProfit)}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {[['Maliyet (Yatırılan)', fmtCur(summary.totalCost), 'Portföydeki toplam anapara', 'bg-slate-300', 'text-slate-800'],
+                  ['Güncel Değer', fmtCur(summary.totalValue), 'Anlık piyasa değeri', 'bg-indigo-500', 'text-indigo-700'],
+                  ['Brüt Kâr / Zarar', (summary.netProfit > 0 ? '+' : '') + fmtCur(summary.netProfit), 'Kesintiler öncesi kâr', 'bg-amber-400', summary.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'],
+                  ['Net Kâr', (summary.netProfit > 0 ? '+' : '') + fmtCur(summary.netProfit), 'Gerçekleşen net kazanç', 'bg-emerald-500', summary.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600']].map(([t, v, sub, bar, col], i) => (
+                  <div key={i} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 relative overflow-hidden">
+                    <div className={`absolute top-0 left-0 w-1 h-full ${bar}`}></div>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">{t}</p>
+                    <h3 className={`text-2xl font-bold mb-1 ${col}`}>{v}{i === 3 && <span className={`text-sm font-bold ml-2 ${summary.netProfit >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>({summary.netProfitPercent > 0 ? '+' : ''}{summary.netProfitPercent.toFixed(2)}%)</span>}</h3>
+                    <p className="text-xs text-slate-500">{sub}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-lg font-bold text-slate-800">Günlük Kapanış Fiyatı Ekle</h2>
+                  <button onClick={handleAutoFetch} disabled={isFetching} className="bg-indigo-600 text-white hover:bg-indigo-700 px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 disabled:opacity-50 shadow-sm"><RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />{isFetching ? "TEFAS'tan Çekiliyor..." : 'TEFAS Canlı Veri Çek'}</button>
+                </div>
+                <p className="text-xs text-slate-500 mb-4 border-l-2 border-indigo-200 pl-2">Çekilen/girilen her fiyat tarihiyle kalıcı geçmişe eklenir; eski kayıtların üzerine yazılmaz.</p>
+                <form onSubmit={handleDailyPriceUpdate} className="flex flex-col md:flex-row gap-4 items-end">
+                  <div className="flex-1 w-full"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fon Seçin</label><select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={priceUpdateFund} onChange={(e) => setPriceUpdateFund(e.target.value)}><option value="">Seçiniz...</option>{definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code}</option>)}</select></div>
+                  <div className="w-full md:w-40"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kapanış Tarihi</label><input type="date" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none text-sm" value={priceUpdateDate} onChange={(e) => setPriceUpdateDate(e.target.value)} /></div>
+                  <div className="w-full md:w-48"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kapanış Fiyatı (₺)</label><input type="number" step="any" placeholder="0.0000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={priceUpdateValue} onChange={(e) => setPriceUpdateValue(e.target.value)} /></div>
+                  <button type="submit" className="w-full md:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl shadow-sm flex items-center justify-center gap-2"><PlusCircle size={18} /> Kaydet</button>
+                </form>
+              </div>
+
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                <div className="flex items-center gap-2 mb-4"><Database size={18} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Kayıtlı Fiyat Geçmişi</h2></div>
+                <div className="relative mb-4">
+                  <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm appearance-none pr-10" value={historyViewFund} onChange={(e) => setHistoryViewFund(e.target.value)}>
+                    <option value="">Geçmişini görmek istediğiniz fonu seçin...</option>
+                    {definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code} ({priceHistory[f.code] ? priceHistory[f.code].length : 0} kayıt)</option>)}
+                  </select>
+                  <ChevronDown size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                </div>
+                {historyViewFund ? (selectedHistory.length ? (
+                  <div className="max-h-72 overflow-y-auto border border-slate-100 rounded-xl">
+                    <table className="w-full text-sm"><thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0"><tr><th className="p-3 text-left font-bold">Tarih</th><th className="p-3 text-right font-bold">Kapanış (₺)</th></tr></thead>
+                    <tbody className="divide-y divide-slate-100">{selectedHistory.map((r) => <tr key={r.date} className="hover:bg-slate-50"><td className="p-3 text-slate-600 font-medium">{new Date(r.date).toLocaleDateString('tr-TR')}</td><td className="p-3 text-right font-mono text-slate-800">{fmtPrice(r.value)}</td></tr>)}</tbody></table>
+                  </div>
+                ) : <p className="text-sm text-slate-400 italic py-4 text-center">Bu fon için henüz kayıt yok.</p>) : <p className="text-sm text-slate-400 italic py-4 text-center">Tüm kapanış fiyatları burada tarih tarih saklanır.</p>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {(activeTab === 'portfolio' || activeTab === 'history') && (
+          <div className="mt-8 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+              <h2 className="text-xl font-bold text-slate-800">{activeTab === 'portfolio' ? 'Fon Portföy Tablosu' : 'Fon Hareket Defteri'}</h2>
+              <p className="text-sm text-slate-500 mt-1">{activeTab === 'portfolio' ? 'Elinizdeki fonların toplu özeti.' : 'Tüm alış/satış işlemleriniz.'}</p>
+            </div>
+            <div className="overflow-x-auto">
+              {activeTab === 'portfolio' ? (
+                <table className="w-full text-left border-collapse min-w-[760px]">
+                  <thead><tr className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider border-b border-slate-200">
+                    <th className="p-4 font-bold">Fon</th><th className="p-4 font-bold text-right">Adet</th><th className="p-4 font-bold text-right">Yatırılan</th><th className="p-4 font-bold text-right w-48">Güncel Fiyat</th><th className="p-4 font-bold text-right">Toplam Değer</th><th className="p-4 font-bold text-right">Kar/Zarar</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {portfolio.length === 0 ? <tr><td colSpan="6" className="p-8 text-center text-slate-400">Portföyünüzde fon yok. Soldan işlem ekleyin.</td></tr> :
+                      portfolio.map((item) => (
+                        <tr key={item.code} className="hover:bg-slate-50 group">
+                          <td className="p-4"><div className="font-extrabold text-indigo-700">{item.code}</div><div className="text-[10px] text-slate-400 truncate max-w-[200px]" title={item.name}>{item.name}</div></td>
+                          <td className="p-4 text-right font-medium text-slate-700">{fmtQty(item.quantity)}</td>
+                          <td className="p-4 text-right font-bold text-slate-700">{fmtCur(item.totalCost)}</td>
+                          <td className="p-4 text-right">
+                            {editingPrice === item.code ? (
+                              <div className="flex items-center justify-end gap-1"><input type="number" step="0.0001" className="w-24 px-2 py-1 text-sm border border-indigo-300 rounded outline-none" value={tempPrice} onChange={(e) => setTempPrice(e.target.value)} autoFocus /><button onClick={() => handleTablePriceUpdate(item.code)} className="text-emerald-600 p-1 bg-emerald-50 rounded"><Check size={16} /></button></div>
+                            ) : (
+                              <div className="flex items-center justify-end gap-2"><div className="flex flex-col items-end"><span className="font-bold text-slate-800">{fmtPrice(item.currentPrice)}</span>{item.priceDate && <span className="text-[10px] text-slate-400 font-medium">{new Date(item.priceDate).toLocaleDateString('tr-TR')}</span>}</div><button onClick={() => { setEditingPrice(item.code); setTempPrice(item.currentPrice); }} className="text-slate-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100"><Edit2 size={14} /></button></div>
+                            )}
+                          </td>
+                          <td className="p-4 text-right font-bold text-slate-800">{fmtCur(item.currentValue)}</td>
+                          <td className="p-4 text-right"><div className={`flex flex-col items-end ${item.profitLoss >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}><span className="font-bold">{item.profitLoss > 0 ? '+' : ''}{fmtCur(item.profitLoss)}</span><span className={`text-xs px-1.5 py-0.5 rounded mt-0.5 font-bold ${item.profitLoss >= 0 ? 'bg-emerald-50' : 'bg-rose-50'}`}>{item.profitLossPercent > 0 ? '+' : ''}{item.profitLossPercent.toFixed(2)}%</span></div></td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="w-full text-left border-collapse min-w-[900px] text-xs">
+                  <thead><tr className="bg-slate-50 text-slate-500 uppercase tracking-wider border-b border-slate-200">
+                    <th className="p-3 text-center">NO</th><th className="p-3 text-left">FON</th><th className="p-3 text-center">BAŞ.</th><th className="p-3 text-center">BİTİŞ</th><th className="p-3 text-center">GÜN</th><th className="p-3 text-right">ALIŞ FİYAT</th><th className="p-3 text-right">GÜNCEL</th><th className="p-3 text-right">ORAN(YIL)</th><th className="p-3 text-right">KAZANÇ</th><th className="p-3 text-right">TUTAR</th><th className="p-3 text-center">SİL</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {transactions.length === 0 ? <tr><td colSpan="11" className="p-12 text-center text-slate-400"><span className="block text-base font-semibold text-slate-600 mb-2">Henüz hareket yok</span>Soldan "Alışı Ekle" ile başlayın.</td></tr> :
+                      [...transactions].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t, idx) => {
+                        const mp = marketPrices[t.fundCode] || { value: t.price, date: t.date };
+                        const endDate = mp.date || new Date().toISOString().split('T')[0];
+                        const endPrice = mp.value;
+                        const diffDays = Math.ceil(Math.abs(new Date(endDate) - new Date(t.date)) / 86400000);
+                        const isBuy = t.type === 'buy';
+                        const profit = isBuy ? (endPrice - t.price) * t.quantity : 0;
+                        const annualYield = diffDays > 0 && t.price > 0 ? ((endPrice / t.price - 1) / diffDays) * 365 * 100 : 0;
+                        const amount = t.totalAmount || t.quantity * t.price;
+                        return (
+                          <tr key={t.id} className="hover:bg-slate-50">
+                            <td className="p-3 text-center text-slate-400">{idx + 1}</td>
+                            <td className="p-3 font-extrabold text-indigo-700">{t.fundCode}<span className={`ml-1 text-[10px] font-bold ${isBuy ? 'text-indigo-400' : 'text-rose-400'}`}>{isBuy ? 'ALIŞ' : 'SATIŞ'}</span></td>
+                            <td className="p-3 text-center text-slate-600">{new Date(t.date).toLocaleDateString('tr-TR')}</td>
+                            <td className="p-3 text-center text-slate-600">{new Date(endDate).toLocaleDateString('tr-TR')}</td>
+                            <td className="p-3 text-center font-bold text-slate-700">{diffDays}</td>
+                            <td className="p-3 text-right font-mono text-slate-600">{fmtPrice(t.price)}</td>
+                            <td className="p-3 text-right font-mono text-slate-800">{fmtPrice(endPrice)}</td>
+                            <td className="p-3 text-right font-bold text-slate-600">{isBuy && diffDays > 0 ? `%${annualYield.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}` : '-'}</td>
+                            <td className={`p-3 text-right font-bold ${profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{isBuy ? (profit > 0 ? '+' : '') + fmtCur(profit) : '-'}</td>
+                            <td className={`p-3 text-right font-bold ${isBuy ? 'text-indigo-600' : 'text-rose-600'}`}>{fmtCur(amount)}</td>
+                            <td className="p-3 text-center"><button onClick={() => handleDeleteTransaction(t.id)} className="text-slate-400 hover:text-rose-600 p-1.5 hover:bg-rose-50 rounded-lg"><Trash2 size={16} /></button></td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'add' && (
+          <div className="max-w-3xl mx-auto mt-10">
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+              <div className="flex items-center gap-3 mb-6"><div className="bg-indigo-100 p-3 rounded-xl text-indigo-600"><PlusCircle size={28} /></div><div><h2 className="text-xl font-bold text-slate-800">Sisteme Yeni Fon Tanımla</h2><p className="text-sm text-slate-500">Önce TEFAS fon kodunu ve adını ekleyin.</p></div></div>
+              <form onSubmit={handleAddDefinedFund} className="flex flex-col sm:flex-row gap-4 mb-10 bg-slate-50 p-6 rounded-xl border border-slate-100">
+                <div className="w-full sm:w-1/4"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kodu</label><input type="text" value={newFundCode} onChange={(e) => setNewFundCode(e.target.value)} placeholder="Örn: GAL" className="w-full border border-slate-200 bg-white rounded-xl px-4 py-3 uppercase outline-none font-bold" maxLength={6} required /></div>
+                <div className="w-full sm:w-2/4"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fonun Adı</label><input type="text" value={newFundName} onChange={(e) => setNewFundName(e.target.value)} placeholder="Çekince otomatik dolar" className="w-full border border-slate-200 bg-white rounded-xl px-4 py-3 uppercase outline-none text-sm font-medium" required /></div>
+                <div className="w-full sm:w-1/4 flex items-end"><button type="submit" className="w-full bg-indigo-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-indigo-700 shadow-sm">Kaydet</button></div>
+              </form>
+              <h3 className="text-sm font-bold text-slate-800 border-b border-slate-100 pb-3 mb-3">Kayıtlı Fonlar</h3>
+              <div className="flex flex-col gap-2">
+                {definedFunds.length === 0 && <p className="text-slate-400 text-sm italic">Henüz tanımlı fon yok.</p>}
+                {definedFunds.map((f) => (
+                  <div key={f.code} className="bg-white hover:bg-slate-50 border border-slate-200 px-4 py-3 rounded-xl flex items-center justify-between group">
+                    <div className="flex items-center gap-4"><span className="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-lg font-bold text-sm min-w-[60px] text-center">{f.code}</span><span className="text-sm font-medium text-slate-700">{f.name}</span></div>
+                    <button onClick={() => handleDeleteDefinedFund(f.code)} className="text-slate-300 hover:text-rose-600 p-2 rounded-lg hover:bg-rose-50 opacity-0 group-hover:opacity-100"><Trash2 size={18} /></button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {modalConfig.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+              <h3 className="text-xl font-bold text-slate-800 mb-2">{modalConfig.title}</h3>
+              <p className="text-slate-600 mb-6">{modalConfig.message}</p>
+              <div className="flex justify-end gap-3">
+                {!modalConfig.isAlert && <button onClick={() => setModalConfig({ ...modalConfig, isOpen: false })} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg font-medium">İptal</button>}
+                <button onClick={() => { if (modalConfig.onConfirm) modalConfig.onConfirm(); else setModalConfig({ ...modalConfig, isOpen: false }); }} className={`px-4 py-2 text-white rounded-lg font-medium ${modalConfig.isAlert ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}>{modalConfig.isAlert ? 'Tamam' : 'Onayla ve Sil'}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
