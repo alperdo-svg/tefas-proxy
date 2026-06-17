@@ -15,10 +15,14 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
-const { useState, useMemo, useEffect } = React;
+const { useState, useMemo, useEffect, useRef } = React;
 
 /* ===== Proxy: aynı Vercel projesinde /api/tefas olduğu için göreli adres ===== */
 const CUSTOM_PROXY = '/api/tefas';
+/* ===== Bulut veri deposu (her cihazdan erişim) ===== */
+const CLOUD_API = '/api/data';
+/* ===== TEFAS fon tarayıcı/karşılaştırma listesi ===== */
+const FONLAR_API = '/api/fonlar';
 const PERIYOD = 12;
 
 function parseTefasResult(data) {
@@ -188,6 +192,90 @@ function App() {
   useEffect(() => save('definedFunds', definedFunds), [definedFunds]);
   useEffect(() => save('priceHistory', priceHistory), [priceHistory]);
 
+  /* ===== Bulut senkronizasyonu ===== */
+  const [accountKey, setAccountKey] = useState(() => load('accountKey', ''));
+  const [authed, setAuthed] = useState(() => !!load('accountKey', '') || !!load('cloudless', false));
+  const [cloudless, setCloudless] = useState(() => !!load('cloudless', false));
+  const [cloudStatus, setCloudStatus] = useState('idle'); // idle | loading | saving | saved | error
+  const [keyInput, setKeyInput] = useState('');
+  const hydratedRef = useRef(false);
+
+  const saveToCloud = async (data) => {
+    if (cloudless || !accountKey) return;
+    setCloudStatus('saving');
+    try {
+      const r = await fetch(CLOUD_API, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: accountKey, data: data || { transactions, definedFunds, priceHistory } }),
+      });
+      const j = await r.json();
+      setCloudStatus(j && j.ok ? 'saved' : 'error');
+    } catch { setCloudStatus('error'); }
+  };
+
+  // Giriş sonrası buluttan veriyi getir (yoksa mevcut yerel veriyi buluta taşı)
+  useEffect(() => {
+    if (!authed || cloudless || !accountKey) return;
+    let cancelled = false;
+    (async () => {
+      setCloudStatus('loading');
+      try {
+        const r = await fetch(`${CLOUD_API}?key=${encodeURIComponent(accountKey)}`);
+        const j = await r.json();
+        if (cancelled) return;
+        if (j && j.ok && j.data && Array.isArray(j.data.transactions)) {
+          setTransactions(j.data.transactions || []);
+          setDefinedFunds(j.data.definedFunds && j.data.definedFunds.length ? j.data.definedFunds : SEED_FUNDS);
+          setPriceHistory(j.data.priceHistory || {});
+          hydratedRef.current = true;
+          setCloudStatus('saved');
+        } else {
+          hydratedRef.current = true;
+          await saveToCloud({ transactions, definedFunds, priceHistory });
+        }
+      } catch {
+        if (!cancelled) { setCloudStatus('error'); hydratedRef.current = true; }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authed, accountKey, cloudless]);
+
+  // Veri değişince buluta otomatik kaydet (hidrasyon sonrası, gecikmeli)
+  useEffect(() => {
+    if (!authed || cloudless || !hydratedRef.current) return;
+    const t = setTimeout(() => { saveToCloud(); }, 1500);
+    return () => clearTimeout(t);
+  }, [transactions, definedFunds, priceHistory, authed, cloudless]);
+
+  const handleLogin = () => {
+    const k = keyInput.trim();
+    if (k.length < 6) { showAlert('Geçersiz Anahtar', 'Hesap anahtarı en az 6 karakter olmalı. Uzun ve size özel bir ifade seçin.'); return; }
+    save('accountKey', k); save('cloudless', false);
+    hydratedRef.current = false;
+    setCloudless(false); setAccountKey(k); setAuthed(true);
+  };
+  const handleCloudless = () => { save('cloudless', true); setCloudless(true); setAuthed(true); };
+  const handleLogout = () => {
+    save('accountKey', ''); save('cloudless', false);
+    hydratedRef.current = false;
+    setAccountKey(''); setCloudless(false); setAuthed(false); setKeyInput(''); setCloudStatus('idle');
+  };
+  const reloadFromCloud = async () => {
+    if (cloudless || !accountKey) return;
+    setCloudStatus('loading');
+    try {
+      const r = await fetch(`${CLOUD_API}?key=${encodeURIComponent(accountKey)}`);
+      const j = await r.json();
+      if (j && j.ok && j.data && Array.isArray(j.data.transactions)) {
+        setTransactions(j.data.transactions || []);
+        setDefinedFunds(j.data.definedFunds && j.data.definedFunds.length ? j.data.definedFunds : SEED_FUNDS);
+        setPriceHistory(j.data.priceHistory || {});
+        setCloudStatus('saved');
+        showAlert('Yenilendi', 'Veriler buluttan güncellendi.');
+      } else { setCloudStatus('saved'); showAlert('Bilgi', 'Bulutta bu anahtara ait veri bulunamadı.'); }
+    } catch { setCloudStatus('error'); showAlert('Hata', 'Buluta ulaşılamadı.'); }
+  };
+
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
   const marketPrices = useMemo(() => {
@@ -217,6 +305,14 @@ function App() {
   const [reportFund, setReportFund] = useState('');
   const [reportPeriod, setReportPeriod] = useState('1y');
   const [expandedFund, setExpandedFund] = useState(null);
+  // ===== Fon Tarayıcı / Karşılaştırma =====
+  const [scrFunds, setScrFunds] = useState([]);
+  const [scrLoading, setScrLoading] = useState(false);
+  const [scrError, setScrError] = useState('');
+  const [scrType, setScrType] = useState('Para Piyasası');
+  const [scrStatus, setScrStatus] = useState('all'); // all | trading | nontrading
+  const [scrSearch, setScrSearch] = useState('');
+  const [scrSort, setScrSort] = useState({ key: 'g1y', dir: 'desc' });
   const [modalConfig, setModalConfig] = useState({ isOpen: false, title: '', message: '', onConfirm: null, isAlert: true });
   const [isFetching, setIsFetching] = useState(false);
 
@@ -437,6 +533,99 @@ function App() {
 
   const fmtPct = (v) => (v == null ? '-' : `${v > 0 ? '+' : ''}${v.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}%`);
 
+  // ===== Fon Tarayıcı mantığı =====
+  const fetchScreener = async () => {
+    setScrLoading(true); setScrError('');
+    try {
+      const r = await fetch(FONLAR_API);
+      const j = await r.json();
+      if (j && j.ok && Array.isArray(j.funds)) setScrFunds(j.funds);
+      else setScrError((j && j.error) || 'Fon listesi alınamadı.');
+    } catch (e) { setScrError('Bağlantı hatası: ' + String(e)); }
+    finally { setScrLoading(false); }
+  };
+  // Rapor sekmesi ilk açıldığında otomatik getir
+  useEffect(() => {
+    if (activeTab === 'report' && scrFunds.length === 0 && !scrLoading && !scrError) fetchScreener();
+  }, [activeTab]);
+
+  const ownedCodes = useMemo(() => {
+    const s = new Set();
+    definedFunds.forEach((f) => s.add(f.code));
+    transactions.forEach((t) => s.add(t.fundCode));
+    return s;
+  }, [definedFunds, transactions]);
+
+  const scrTypes = useMemo(() => {
+    const s = new Set(scrFunds.map((f) => f.tur).filter(Boolean));
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'tr'));
+  }, [scrFunds]);
+
+  const scrFiltered = useMemo(() => {
+    const tr = (x) => (x || '').toLocaleLowerCase('tr');
+    let list = scrFunds;
+    if (scrType !== 'Tümü') list = list.filter((f) => tr(f.tur).includes(tr(scrType)));
+    if (scrStatus === 'trading') list = list.filter((f) => f.tefas);
+    else if (scrStatus === 'nontrading') list = list.filter((f) => !f.tefas);
+    const q = tr(scrSearch).trim();
+    if (q) list = list.filter((f) => tr(f.kod).includes(q) || tr(f.ad).includes(q));
+    const { key, dir } = scrSort;
+    const isText = key === 'kod' || key === 'ad' || key === 'tur';
+    return [...list].sort((a, b) => {
+      const va = a[key], vb = b[key];
+      if (isText) return dir === 'asc' ? String(va).localeCompare(String(vb), 'tr') : String(vb).localeCompare(String(va), 'tr');
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;     // boş getiriler her zaman sona
+      if (vb == null) return -1;
+      return dir === 'asc' ? va - vb : vb - va;
+    });
+  }, [scrFunds, scrType, scrStatus, scrSearch, scrSort]);
+
+  const scrSortBy = (key) => setScrSort((s) => (s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }));
+
+  const exportScreener = () => {
+    if (!scrFiltered.length) { showAlert('Veri Yok', 'Önce fon listesi gelsin.'); return; }
+    const header = ['Fon Kodu', 'Fon Adı', 'Şemsiye Türü', 'İşlem', 'Risk', '1 Ay %', '3 Ay %', '6 Ay %', 'Yılbaşı %', '1 Yıl %', '3 Yıl %', '5 Yıl %'];
+    const rows = [header, ...scrFiltered.map((f) => [f.kod, f.ad, f.tur, f.tefas ? 'Gören' : 'Görmeyen', f.risk, f.g1a, f.g3a, f.g6a, f.gyb, f.g1y, f.g3y, f.g5y])];
+    try {
+      if (window.XLSX) {
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        ws['!cols'] = [{ wch: 8 }, { wch: 42 }, { wch: 22 }, { wch: 10 }, { wch: 6 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 9 }, { wch: 9 }, { wch: 9 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Fon Karşılaştırma');
+        XLSX.writeFile(wb, 'fon_karsilastirma.xlsx');
+      } else {
+        const csv = rows.map((r) => r.join(';')).join('\n');
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'fon_karsilastirma.csv'; a.click();
+      }
+    } catch { showAlert('Hata', 'Dışa aktarma başarısız.'); }
+  };
+  const scrShown = scrFiltered.slice(0, 600);
+
+
+  if (!authed) {
+    return (
+      <div className="min-h-screen bg-[#f3f4f6] flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8 max-w-md w-full">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="bg-indigo-600 text-white w-11 h-11 rounded-xl flex items-center justify-center"><PieChart size={22} /></div>
+            <div>
+              <h1 className="text-xl font-bold text-slate-800">Fon Getiri Paneli</h1>
+              <p className="text-xs text-slate-500">Verileriniz her cihazdan erişilebilsin</p>
+            </div>
+          </div>
+          <p className="text-sm text-slate-600 mt-4 mb-4">Size özel bir <strong>hesap anahtarı</strong> girin. Aynı anahtarı başka bir cihazda da girerseniz aynı portföyü görürsünüz.</p>
+          <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Hesap Anahtarı</label>
+          <input type="password" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleLogin(); }} placeholder="örn. odas-fon-2026-uzun-bir-ifade" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium mb-1" autoFocus />
+          <p className="text-[11px] text-slate-400 mb-4">En az 6 karakter. Tahmin edilmesi zor, uzun bir ifade seçin ve parolanız gibi saklayın — kaybederseniz buluttaki verilere erişemezsiniz.</p>
+          <button onClick={handleLogin} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl">Verilerime Eriş</button>
+          <button onClick={handleCloudless} className="w-full mt-3 text-slate-500 hover:text-slate-700 text-sm font-medium">Bulutsuz devam et (sadece bu cihaz)</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f3f4f6] text-slate-800 pb-12">
       <header className="bg-[#1e1b4b] text-white border-b border-indigo-900 shadow-md sticky top-0 z-10">
@@ -452,6 +641,33 @@ function App() {
           </nav>
         </div>
       </header>
+
+      {!cloudless ? (
+        <div className="max-w-7xl mx-auto px-4 mt-3">
+          <div className="flex items-center justify-between flex-wrap gap-2 bg-white border border-slate-200 rounded-xl px-4 py-2 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              {cloudStatus === 'saving' && <span className="text-amber-600 font-medium flex items-center gap-1"><RefreshCw size={13} className="animate-spin" /> Buluta kaydediliyor…</span>}
+              {cloudStatus === 'loading' && <span className="text-indigo-600 font-medium flex items-center gap-1"><RefreshCw size={13} className="animate-spin" /> Buluttan yükleniyor…</span>}
+              {cloudStatus === 'saved' && <span className="text-emerald-600 font-medium flex items-center gap-1"><Check size={13} /> Bulutta kayıtlı</span>}
+              {cloudStatus === 'error' && <span className="text-rose-600 font-medium flex items-center gap-1"><Info size={13} /> Buluta ulaşılamadı (yerelde çalışıyor)</span>}
+              {cloudStatus === 'idle' && <span className="text-slate-400">Bulut hazır</span>}
+              <span className="text-slate-300">·</span>
+              <span className="text-slate-500">Anahtar: <span className="font-mono">{accountKey ? accountKey.slice(0, 2) + '••••' + accountKey.slice(-2) : '—'}</span></span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={reloadFromCloud} className="text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded font-medium flex items-center gap-1"><RefreshCw size={13} /> Buluttan Yenile</button>
+              <button onClick={handleLogout} className="text-slate-500 hover:bg-slate-100 px-2 py-1 rounded font-medium">Çıkış / Anahtar Değiştir</button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="max-w-7xl mx-auto px-4 mt-3">
+          <div className="flex items-center justify-between flex-wrap gap-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2 text-xs text-amber-800">
+            <span className="flex items-center gap-1"><Info size={13} /> Bulutsuz mod: veriler yalnızca bu cihazda. Her cihazdan erişim için hesap anahtarı oluşturun.</span>
+            <button onClick={handleLogout} className="text-amber-800 hover:bg-amber-100 px-2 py-1 rounded font-medium">Hesap Anahtarı Oluştur</button>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         {activeTab === 'portfolio' && (
@@ -684,77 +900,79 @@ function App() {
         {activeTab === 'report' && (
           <div>
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6">
-              <div className="flex flex-col md:flex-row md:items-end gap-4 justify-between">
-                <div className="flex-1 w-full">
-                  <div className="flex items-center gap-2 mb-3"><BarChart3 size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Fon Raporu</h2></div>
-                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Rapor için fon seçin</label>
-                  <select className="w-full md:max-w-md border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={reportFund} onChange={(e) => setReportFund(e.target.value)}>
-                    <option value="">Fon seçiniz...</option>
-                    {definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 40 ? f.name.slice(0, 40) + '...' : f.name} ({priceHistory[f.code] ? priceHistory[f.code].length : 0} kayıt)</option>)}
+              <div className="flex items-center gap-2 mb-4"><BarChart3 size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Fon Tarayıcı / Karşılaştırma</h2></div>
+              <div className="flex flex-col lg:flex-row lg:items-end gap-3">
+                <div className="flex-1 min-w-[180px]">
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Şemsiye Fon Türü</label>
+                  <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-2.5 outline-none font-medium text-sm" value={scrType} onChange={(e) => setScrType(e.target.value)}>
+                    <option value="Para Piyasası">Para Piyasası</option>
+                    <option value="Tümü">Tümü (tüm türler)</option>
+                    {scrTypes.filter((t) => !t.toLocaleLowerCase('tr').includes('para piyasası')).map((t) => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </div>
-                {reportFund && reportHist.length > 0 && (
-                  <button onClick={exportExcel} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-5 rounded-xl shadow-sm flex items-center justify-center gap-2 whitespace-nowrap"><Download size={18} /> Excel'e Aktar</button>
-                )}
+                <div className="min-w-[150px]">
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">TEFAS İşlem Durumu</label>
+                  <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-2.5 outline-none font-medium text-sm" value={scrStatus} onChange={(e) => setScrStatus(e.target.value)}>
+                    <option value="all">Tümü</option>
+                    <option value="trading">İşlem Gören</option>
+                    <option value="nontrading">İşlem Görmeyen</option>
+                  </select>
+                </div>
+                <div className="flex-1 min-w-[180px]">
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Ara (kod / ad)</label>
+                  <input type="text" value={scrSearch} onChange={(e) => setScrSearch(e.target.value)} placeholder="örn. GAL veya para piyasası" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-2.5 outline-none font-medium text-sm" />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={fetchScreener} disabled={scrLoading} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap"><RefreshCw size={16} className={scrLoading ? 'animate-spin' : ''} /> {scrLoading ? 'Geliyor…' : 'Yenile'}</button>
+                  <button onClick={exportScreener} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap"><Download size={16} /> Excel</button>
+                </div>
+              </div>
+              <div className="text-xs text-slate-500 mt-3">
+                {scrError ? <span className="text-rose-600 font-medium">{scrError}</span>
+                  : scrLoading ? 'TEFAS\'tan tüm fonlar çekiliyor…'
+                  : `${scrFiltered.length} fon listeleniyor${scrFiltered.length > 600 ? ' (ilk 600 gösteriliyor)' : ''}. ★ = portföyünüzdeki fonlar.`}
               </div>
             </div>
 
-            {!reportFund ? (
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-16 text-center text-slate-400">
-                Yukarıdan bir fon seçin. Seçtiğiniz fonun fiyat grafiği ve dönemsel getirileri burada görünür.
-                <div className="text-xs mt-2">İpucu: Veri yoksa önce "Portföyüm" sekmesinden <strong>TEFAS Canlı Veri Çek</strong> ile fiyatları çekin.</div>
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+              {scrLoading && scrFunds.length === 0 ? (
+                <div className="p-16 text-center text-slate-400">Fonlar yükleniyor…</div>
+              ) : scrFiltered.length === 0 ? (
+                <div className="p-16 text-center text-slate-400">Sonuç yok. Filtreyi değiştirin ya da "Yenile"ye basın.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs min-w-[920px]">
+                    <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider border-b border-slate-200">
+                      <tr>
+                        {[['kod', 'Fon Kodu', 'left'], ['ad', 'Fon Adı', 'left'], ['tur', 'Şemsiye', 'left'], ['risk', 'Risk', 'center'], ['g1a', '1 Ay', 'right'], ['g3a', '3 Ay', 'right'], ['g6a', '6 Ay', 'right'], ['gyb', 'Yılbaşı', 'right'], ['g1y', '1 Yıl', 'right'], ['g3y', '3 Yıl', 'right'], ['g5y', '5 Yıl', 'right']].map(([key, label, align]) => (
+                          <th key={key} onClick={() => scrSortBy(key)} className={`p-3 cursor-pointer select-none hover:text-indigo-600 text-${align} whitespace-nowrap`}>
+                            {label}{scrSort.key === key ? (scrSort.dir === 'desc' ? ' ▼' : ' ▲') : ''}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {scrShown.map((f) => {
+                        const owned = ownedCodes.has(f.kod);
+                        const cell = (v) => <td className={`p-3 text-right font-bold ${v == null ? 'text-slate-300' : v >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct(v)}</td>;
+                        return (
+                          <tr key={f.kod} className={owned ? 'bg-indigo-50/60 hover:bg-indigo-50' : 'hover:bg-slate-50'}>
+                            <td className="p-3 font-extrabold text-indigo-700 whitespace-nowrap">{owned && <span className="text-amber-500 mr-1">★</span>}{f.kod}</td>
+                            <td className="p-3 text-slate-700 max-w-[260px] truncate" title={f.ad}>{f.ad}</td>
+                            <td className="p-3 text-slate-500 max-w-[160px] truncate" title={f.tur}>{f.tur}{!f.tefas && <span className="ml-1 text-[10px] text-slate-400">(işlem görmüyor)</span>}</td>
+                            <td className="p-3 text-center text-slate-600 font-bold">{f.risk || '-'}</td>
+                            {cell(f.g1a)}{cell(f.g3a)}{cell(f.g6a)}{cell(f.gyb)}{cell(f.g1y)}{cell(f.g3y)}{cell(f.g5y)}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="p-4 text-[10px] text-slate-400 border-t border-slate-100">
+                Getiriler doğrudan TEFAS'tan gelir (yüzde). Sütun başlığına tıklayarak sıralayın — en kârlıyı görmek için ilgili dönemi azalan sıralayın. ★ ile işaretli fonlar sizin portföyünüzde tanımlı olanlardır.
               </div>
-            ) : reportHist.length < 2 ? (
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-16 text-center text-slate-400">
-                Bu fon için yeterli fiyat verisi yok. "Portföyüm" sekmesinden <strong>TEFAS Canlı Veri Çek</strong>'e basın.
-              </div>
-            ) : (
-              <>
-                {/* Üst bilgi şeridi */}
-                <div className="bg-[#1e1b4b] rounded-2xl p-5 mb-6 text-white shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div>
-                    <div className="text-2xl font-extrabold tracking-wide">{reportFund}</div>
-                    <div className="text-xs text-indigo-200 max-w-md">{reportFundName}</div>
-                  </div>
-                  <div className="flex gap-6">
-                    <div className="text-right">
-                      <div className="text-xs text-indigo-300 uppercase font-bold">Son Fiyat</div>
-                      <div className="text-xl font-bold">{fmtPrice(reportReturns.son.value)}</div>
-                      <div className="text-[11px] text-indigo-300">{new Date(reportReturns.son.date).toLocaleDateString('tr-TR')}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xs text-indigo-300 uppercase font-bold">Günlük Getiri</div>
-                      <div className={`text-xl font-bold ${reportReturns.gunluk >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{fmtPct(reportReturns.gunluk)}</div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Grafik */}
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6">
-                  <div className="flex items-center gap-2 mb-4"><TrendingUp size={18} className="text-indigo-500" /><h3 className="text-lg font-bold text-slate-800">Fon Fiyat Grafiği</h3></div>
-                  <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded-xl mb-5 w-fit">
-                    {[['w', 'Haftalık'], ['m', 'Aylık'], ['3m', '3 Aylık'], ['6m', '6 Aylık'], ['ytd', 'Yılbaşından'], ['1y', '1 Yıllık']].map(([p, label]) => (
-                      <button key={p} onClick={() => setReportPeriod(p)} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${reportPeriod === p ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>
-                    ))}
-                  </div>
-                  <PriceChart data={reportChartData} />
-                </div>
-
-                {/* Getiri bilgisi kartları */}
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                  <h3 className="text-lg font-bold text-slate-800 mb-4">Getiri Bilgisi</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                    {[['Son 1 Hafta', reportReturns.hafta], ['Son 1 Ay', reportReturns.ay1], ['Son 3 Ay', reportReturns.ay3], ['Son 6 Ay', reportReturns.ay6], ['Yılbaşından', reportReturns.ytd], ['Son 1 Yıl', reportReturns.yil1]].map(([label, val], i) => (
-                      <div key={i} className="border border-slate-100 rounded-xl p-4 bg-slate-50/50">
-                        <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">{label}</div>
-                        <div className={`text-lg font-bold ${val == null ? 'text-slate-400' : val >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct(val)}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-4 border-l-2 border-indigo-200 pl-2">Getiriler, panelin kayıtlı fiyat geçmişinden hesaplanır. Daha uzun/eksiksiz geçmiş için "TEFAS Canlı Veri Çek" butonunu kullanın. "Excel'e Aktar" tüm günlük kayıtları indirir.</p>
-                </div>
-              </>
-            )}
+            </div>
           </div>
         )}
 
