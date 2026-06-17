@@ -285,7 +285,9 @@ function App() {
         let durum = 'Tutuluyor';
         if (txOnDate.some((t) => t.type === 'buy')) durum = 'Ek Alış';
         if (txOnDate.some((t) => t.type === 'sell')) durum = 'Satış';
-        ledger.push({ date: cur.date, D, prevPrice: prev.value, price: cur.value, gun, oran, gain, J });
+        const isLast = i === closes.length - 1;
+        const txsOnBas = txs.filter((t) => t.date >= prev.date && (t.date < cur.date || (isLast && t.date <= cur.date)));
+        ledger.push({ bas: prev.date, bit: cur.date, D, acilis: prev.value, kapanis: cur.value, gun, oran, gain, J, txsOnBas });
       }
 
       const netShares = sharesAsOf(closes[closes.length - 1].date);
@@ -602,43 +604,42 @@ function App() {
                               <tr className="bg-slate-50/60">
                                 <td colSpan="9" className="p-4">
                                   <div className="text-xs font-bold text-slate-500 uppercase mb-2">Gün Gün Döküm — Yuvarlanan Bakiye</div>
-                                  <div className="max-h-80 overflow-y-auto border border-slate-200 rounded-lg bg-white">
-                                    <table className="w-full text-left border-collapse text-[11px]">
+                                  <div className="max-h-80 overflow-auto border border-slate-200 rounded-lg bg-white">
+                                    <table className="w-full text-left border-collapse text-[11px] min-w-[760px]">
                                       <thead className="sticky top-0 bg-slate-100 text-slate-500 uppercase">
-                                        <tr><th className="p-2 text-left">TARİH</th><th className="p-2 text-right">İŞLEMDEKİ FON BAKİYESİ</th><th className="p-2 text-right">KAPANIŞ FİYATI</th><th className="p-2 text-right">ORAN(YIL)</th><th className="p-2 text-right">KAZANÇ</th><th className="p-2 text-right">TOPLAM TUTAR</th></tr>
+                                        <tr><th className="p-2 text-left">BAŞLANGIÇ</th><th className="p-2 text-left">BİTİŞ</th><th className="p-2 text-right">İŞLEMDEKİ FON BAKİYESİ</th><th className="p-2 text-right">AÇILIŞ FİYATI</th><th className="p-2 text-right">KAPANIŞ FİYATI</th><th className="p-2 text-right">ORAN(YIL)</th><th className="p-2 text-right">KAZANÇ</th><th className="p-2 text-right">TOPLAM TUTAR</th><th className="p-2 text-center">İŞLEM</th></tr>
                                       </thead>
                                       <tbody className="divide-y divide-slate-100">
                                         {p.ledger.length === 0 ? (
-                                          <tr><td colSpan="6" className="p-4 text-center text-slate-400">Gün gün döküm için fiyat geçmişi yok. "TEFAS Canlı Veri Çek"e basın.</td></tr>
+                                          <tr><td colSpan="9" className="p-4 text-center text-slate-400">Gün gün döküm için fiyat geçmişi yok. "TEFAS Canlı Veri Çek"e basın.</td></tr>
                                         ) : (
                                           [...p.ledger].reverse().map((r) => (
-                                            <tr key={r.date} className="hover:bg-slate-50">
-                                              <td className="p-2 text-slate-600 font-medium">{new Date(r.date).toLocaleDateString('tr-TR')}</td>
+                                            <tr key={r.bit} className="hover:bg-slate-50">
+                                              <td className="p-2 text-slate-600 font-medium whitespace-nowrap">{new Date(r.bas).toLocaleDateString('tr-TR')}</td>
+                                              <td className="p-2 text-slate-600 font-medium whitespace-nowrap">{new Date(r.bit).toLocaleDateString('tr-TR')}</td>
                                               <td className="p-2 text-right font-mono text-slate-700">{fmtCur(r.D)}</td>
-                                              <td className="p-2 text-right font-mono text-slate-600">{fmtPrice(r.price)}</td>
+                                              <td className="p-2 text-right font-mono text-slate-500">{fmtPrice(r.acilis)}</td>
+                                              <td className="p-2 text-right font-mono text-slate-700">{fmtPrice(r.kapanis)}</td>
                                               <td className="p-2 text-right font-bold text-slate-600">%{r.oran.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</td>
                                               <td className={`p-2 text-right font-bold ${r.gain >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.gain > 0 ? '+' : ''}{fmtCur(r.gain)}</td>
                                               <td className="p-2 text-right font-bold text-slate-800">{fmtCur(r.J)}</td>
+                                              <td className="p-2 text-center whitespace-nowrap">
+                                                {r.txsOnBas && r.txsOnBas.length > 0 ? (
+                                                  <div className="flex items-center justify-center gap-1">
+                                                    {r.txsOnBas.map((t) => (
+                                                      <span key={t.id} className="flex items-center gap-1">
+                                                        <span className={`font-bold px-1.5 py-0.5 rounded ${t.type === 'buy' ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}>{t.type === 'buy' ? 'ALIŞ' : 'SATIŞ'}</span>
+                                                        <button onClick={(e) => { e.stopPropagation(); handleDeleteTransaction(t.id); }} title="İşlemi sil" className="text-slate-400 hover:text-rose-600 p-1 hover:bg-rose-50 rounded"><Trash2 size={13} /></button>
+                                                      </span>
+                                                    ))}
+                                                  </div>
+                                                ) : <span className="text-slate-300">–</span>}
+                                              </td>
                                             </tr>
                                           ))
                                         )}
                                       </tbody>
                                     </table>
-                                  </div>
-                                  <div className="text-xs font-bold text-slate-500 uppercase mt-4 mb-2">İşlemler (düzeltmek için silebilirsiniz)</div>
-                                  <div className="flex flex-col gap-1">
-                                    {[...p.txs].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
-                                      <div key={t.id} className="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-3 py-2 text-[11px]">
-                                        <div className="flex items-center gap-3 flex-wrap">
-                                          <span className={`font-bold px-2 py-0.5 rounded ${t.type === 'buy' ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}>{t.type === 'buy' ? 'ALIŞ' : 'SATIŞ'}</span>
-                                          <span className="text-slate-600">{new Date(t.date).toLocaleDateString('tr-TR')}</span>
-                                          <span className="text-slate-500">Fiyat: {fmtPrice(t.price)}</span>
-                                          <span className="text-slate-500">Tutar: {fmtCur(t.totalAmount || t.quantity * t.price)}</span>
-                                          <span className="text-slate-400">Adet: {fmtQty(t.quantity)}</span>
-                                        </div>
-                                        <button onClick={(e) => { e.stopPropagation(); handleDeleteTransaction(t.id); }} className="text-slate-400 hover:text-rose-600 p-1.5 hover:bg-rose-50 rounded-lg"><Trash2 size={14} /></button>
-                                      </div>
-                                    ))}
                                   </div>
                                 </td>
                               </tr>
