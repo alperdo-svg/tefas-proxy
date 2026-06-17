@@ -54,6 +54,27 @@ async function fetchTefasFund(code) {
 const load = (k, fb) => { try { const v = localStorage.getItem('fgp_' + k); return v ? JSON.parse(v) : fb; } catch { return fb; } };
 const save = (k, v) => { try { localStorage.setItem('fgp_' + k, JSON.stringify(v)); } catch {} };
 
+/* ===== Türkçe/İngilizce sayı ayrıştırıcı =====
+   "252.357.855,33" -> 252357855.33 | "382,602379" -> 382.602379 | "1,234.56" -> 1234.56 */
+function parseTRNumber(raw) {
+  if (raw == null) return NaN;
+  let s = String(raw).trim().replace(/[₺\s]/g, '');
+  if (s === '') return NaN;
+  const hasDot = s.includes('.'), hasComma = s.includes(',');
+  if (hasDot && hasComma) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.'); // TR: nokta binlik, virgül ondalık
+    else s = s.replace(/,/g, ''); // EN: virgül binlik, nokta ondalık
+  } else if (hasComma) {
+    s = s.replace(/,/g, '.'); // tek virgül = ondalık
+  } else if (hasDot) {
+    if (s.split('.').length > 2) s = s.replace(/\./g, ''); // 252.357.855 = binlik
+    // tek nokta => ondalık kabul, dokunma (382.602379)
+  }
+  s = s.replace(/[^0-9.\-]/g, '');
+  const n = parseFloat(s);
+  return isNaN(n) ? NaN : n;
+}
+
 /* ===== İkonlar (lucide tarzı basit SVG) ===== */
 const Svg = ({ size = 18, className = '', children }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg>
@@ -195,6 +216,7 @@ function App() {
   const [historyViewFund, setHistoryViewFund] = useState('');
   const [reportFund, setReportFund] = useState('');
   const [reportPeriod, setReportPeriod] = useState('1y');
+  const [expandedFund, setExpandedFund] = useState(null);
   const [modalConfig, setModalConfig] = useState({ isOpen: false, title: '', message: '', onConfirm: null, isAlert: true });
   const [isFetching, setIsFetching] = useState(false);
 
@@ -202,7 +224,7 @@ function App() {
   const showConfirm = (title, message, onConfirm) => setModalConfig({ isOpen: true, title, message, onConfirm, isAlert: false });
 
   const calculatedQty = useMemo(() => {
-    const p = parseFloat(txPrice), t = parseFloat(txTotalAmount);
+    const p = parseTRNumber(txPrice), t = parseTRNumber(txTotalAmount);
     if (!isNaN(p) && !isNaN(t) && p > 0) return (t / p).toFixed(6);
     return '0.000000';
   }, [txPrice, txTotalAmount]);
@@ -233,6 +255,56 @@ function App() {
     return { totalValue, totalCost, netProfit, netProfitPercent: totalCost > 0 ? (netProfit / totalCost) * 100 : 0 };
   }, [portfolio]);
 
+  // ===== Yuvarlanan bakiye pozisyonları (Excel "İşlemdeki fon bakiyesi" mantığı) =====
+  // Her fon için: pozisyon satılana kadar bakiye her kapanışta bileşik büyür; alımlar ekler, satışlar düşer.
+  const positions = useMemo(() => {
+    const codes = [...new Set(transactions.map((t) => t.fundCode))];
+    const out = [];
+    codes.forEach((code) => {
+      const txs = transactions.filter((t) => t.fundCode === code).slice().sort((a, b) => a.date.localeCompare(b.date));
+      if (!txs.length) return;
+      const fund = definedFunds.find((f) => f.code === code);
+      const firstBuy = txs[0].date;
+      // Dönem içinde tutulan pay adedi (tarih <= d olan alış - satış)
+      const sharesAsOf = (d) => txs.reduce((s, t) => (t.date <= d ? s + (t.type === 'buy' ? t.quantity : -t.quantity) : s), 0);
+      // Kapanış serisi (ilk alıştan itibaren). İlk alış günü seride yoksa, baş fiyatı = alış fiyatı olarak çapa ekle.
+      let closes = (priceHistory[code] || []).slice().sort((a, b) => a.date.localeCompare(b.date)).filter((h) => h.date >= firstBuy);
+      if (!closes.length || closes[0].date > firstBuy) closes = [{ date: firstBuy, value: txs[0].price }, ...closes];
+
+      const ledger = [];
+      for (let i = 1; i < closes.length; i++) {
+        const prev = closes[i - 1], cur = closes[i];
+        const sharesDuring = sharesAsOf(prev.date);
+        if (sharesDuring <= 0.000001) continue;
+        const D = sharesDuring * prev.value;          // İşlemdeki fon bakiyesi (dönem başı)
+        const gain = sharesDuring * (cur.value - prev.value); // Kazanç
+        const J = D + gain;                            // Toplam Tutar (dönem sonu)
+        const gun = Math.max(1, Math.round((new Date(cur.date) - new Date(prev.date)) / 86400000));
+        const oran = prev.value > 0 ? ((cur.value / prev.value - 1) * 365) / gun * 100 : 0;
+        const txOnDate = txs.filter((t) => t.date === cur.date);
+        let durum = 'Tutuluyor';
+        if (txOnDate.some((t) => t.type === 'buy')) durum = 'Ek Alış';
+        if (txOnDate.some((t) => t.type === 'sell')) durum = 'Satış';
+        ledger.push({ date: cur.date, D, prevPrice: prev.value, price: cur.value, gun, oran, gain, J });
+      }
+
+      const netShares = sharesAsOf(closes[closes.length - 1].date);
+      const lastClose = closes[closes.length - 1];
+      const guncel = lastClose.value;
+      const bakiye = netShares * guncel;
+      const kazanc = ledger.reduce((s, r) => s + r.gain, 0);
+      const gunTotal = Math.max(1, Math.round((new Date(lastClose.date) - new Date(firstBuy)) / 86400000));
+      const ilkAlis = txs[0].price;
+      const oranToplam = ilkAlis > 0 ? ((guncel / ilkAlis - 1) * 365) / gunTotal * 100 : 0;
+      const acik = netShares > 0.000001;
+      out.push({
+        code, name: fund ? fund.name : '', durum: acik ? 'Açık · Alış' : 'Kapalı · Satış', acik,
+        ilkAlis, guncel, gun: gunTotal, bakiye, kazanc, oran: oranToplam, netShares, ledger, txs,
+      });
+    });
+    return out;
+  }, [transactions, priceHistory, definedFunds]);
+
   const handleAddTransaction = (e) => {
     e.preventDefault();
     if (!fundCode || !txPrice || !txTotalAmount) { showAlert('Eksik Bilgi', 'Lütfen Fon, Fiyat ve Tutar alanlarını doldurun.'); return; }
@@ -242,7 +314,7 @@ function App() {
       const owned = (portfolio.find((p) => p.code === fundCode) || {}).quantity || 0;
       if (qty > owned + 1e-6) { showAlert('Yetersiz Bakiye', `Elinizde ${fundCode} fonundan yalnızca ${owned.toFixed(6)} adet var.`); return; }
     }
-    setTransactions((prev) => [...prev, { id: newId(), type: txType, fundCode, quantity: qty, price: parseFloat(txPrice), totalAmount: parseFloat(txTotalAmount), date: txDate, createdAt: Date.now() }]);
+    setTransactions((prev) => [...prev, { id: newId(), type: txType, fundCode, quantity: qty, price: parseTRNumber(txPrice), totalAmount: parseTRNumber(txTotalAmount), date: txDate, createdAt: Date.now() }]);
     setFundCode(''); setTxPrice(''); setTxTotalAmount('');
   };
 
@@ -271,13 +343,13 @@ function App() {
   const handleDailyPriceUpdate = (e) => {
     e.preventDefault();
     if (!priceUpdateFund || !priceUpdateValue) return;
-    addPriceRecords(priceUpdateFund, [{ date: priceUpdateDate, value: parseFloat(priceUpdateValue) }]);
+    addPriceRecords(priceUpdateFund, [{ date: priceUpdateDate, value: parseTRNumber(priceUpdateValue) }]);
     setPriceUpdateValue('');
     showAlert('Fiyat Kaydedildi', `${priceUpdateFund} fonu ${priceUpdateDate} tarihli fiyatıyla geçmişe eklendi!`);
   };
 
   const handleTablePriceUpdate = (code) => {
-    const val = parseFloat(tempPrice);
+    const val = parseTRNumber(tempPrice);
     if (!isNaN(val) && val > 0) addPriceRecords(code, [{ date: new Date().toISOString().split('T')[0], value: val }]);
     setEditingPrice(null);
   };
@@ -399,8 +471,8 @@ function App() {
                   </div>
                   <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">İşlem Tarihi</label><input type="date" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txDate} onChange={(e) => setTxDate(e.target.value)} required /></div>
                   <div className="grid grid-cols-2 gap-3">
-                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fiyat (₺/Pay)</label><input type="number" step="any" placeholder="0.000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
-                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Yatırılan Tutar (₺)' : 'Satış Tutarı (₺)'}</label><input type="number" step="any" placeholder="0.00" className={`w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium ${txType === 'buy' ? 'text-indigo-700' : 'text-rose-700'}`} value={txTotalAmount} onChange={(e) => setTxTotalAmount(e.target.value)} required /></div>
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fiyat (₺/Pay)</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
+                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Yatırılan Tutar (₺)' : 'Satış Tutarı (₺)'}</label><input type="text" inputMode="decimal" placeholder="0,00" className={`w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium ${txType === 'buy' ? 'text-indigo-700' : 'text-rose-700'}`} value={txTotalAmount} onChange={(e) => setTxTotalAmount(e.target.value)} required /></div>
                   </div>
                   <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Alınan' : 'Satılan'} Adet (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{calculatedQty}</span><span className="text-slate-400 text-xs">Adet</span></div></div>
                   <button type="submit" className={`w-full font-bold py-3.5 px-6 rounded-xl shadow-sm flex justify-center items-center gap-2 mt-4 text-white ${txType === 'buy' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}><PlusCircle size={20} />{txType === 'buy' ? 'Alışı Ekle' : 'Satışı Ekle'}</button>
@@ -446,7 +518,7 @@ function App() {
                 <form onSubmit={handleDailyPriceUpdate} className="flex flex-col md:flex-row gap-4 items-end">
                   <div className="flex-1 w-full"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fon Seçin</label><select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={priceUpdateFund} onChange={(e) => setPriceUpdateFund(e.target.value)}><option value="">Seçiniz...</option>{definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code}</option>)}</select></div>
                   <div className="w-full md:w-40"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kapanış Tarihi</label><input type="date" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none text-sm" value={priceUpdateDate} onChange={(e) => setPriceUpdateDate(e.target.value)} /></div>
-                  <div className="w-full md:w-48"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kapanış Fiyatı (₺)</label><input type="number" step="any" placeholder="0.0000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={priceUpdateValue} onChange={(e) => setPriceUpdateValue(e.target.value)} /></div>
+                  <div className="w-full md:w-48"><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kapanış Fiyatı (₺)</label><input type="text" inputMode="decimal" placeholder="0,0000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={priceUpdateValue} onChange={(e) => setPriceUpdateValue(e.target.value)} /></div>
                   <button type="submit" className="w-full md:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl shadow-sm flex items-center justify-center gap-2"><PlusCircle size={18} /> Kaydet</button>
                 </form>
               </div>
@@ -492,7 +564,7 @@ function App() {
                           <td className="p-4 text-right font-bold text-slate-700">{fmtCur(item.totalCost)}</td>
                           <td className="p-4 text-right">
                             {editingPrice === item.code ? (
-                              <div className="flex items-center justify-end gap-1"><input type="number" step="0.0001" className="w-24 px-2 py-1 text-sm border border-indigo-300 rounded outline-none" value={tempPrice} onChange={(e) => setTempPrice(e.target.value)} autoFocus /><button onClick={() => handleTablePriceUpdate(item.code)} className="text-emerald-600 p-1 bg-emerald-50 rounded"><Check size={16} /></button></div>
+                              <div className="flex items-center justify-end gap-1"><input type="text" inputMode="decimal" className="w-24 px-2 py-1 text-sm border border-indigo-300 rounded outline-none" value={tempPrice} onChange={(e) => setTempPrice(e.target.value)} autoFocus /><button onClick={() => handleTablePriceUpdate(item.code)} className="text-emerald-600 p-1 bg-emerald-50 rounded"><Check size={16} /></button></div>
                             ) : (
                               <div className="flex items-center justify-end gap-2"><div className="flex flex-col items-end"><span className="font-bold text-slate-800">{fmtPrice(item.currentPrice)}</span>{item.priceDate && <span className="text-[10px] text-slate-400 font-medium">{new Date(item.priceDate).toLocaleDateString('tr-TR')}</span>}</div><button onClick={() => { setEditingPrice(item.code); setTempPrice(item.currentPrice); }} className="text-slate-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100"><Edit2 size={14} /></button></div>
                             )}
@@ -504,39 +576,82 @@ function App() {
                   </tbody>
                 </table>
               ) : (
-                <table className="w-full text-left border-collapse min-w-[900px] text-xs">
-                  <thead><tr className="bg-slate-50 text-slate-500 uppercase tracking-wider border-b border-slate-200">
-                    <th className="p-3 text-center">NO</th><th className="p-3 text-left">FON</th><th className="p-3 text-center">BAŞ.</th><th className="p-3 text-center">BİTİŞ</th><th className="p-3 text-center">GÜN</th><th className="p-3 text-right">ALIŞ FİYAT</th><th className="p-3 text-right">GÜNCEL</th><th className="p-3 text-right">ORAN(YIL)</th><th className="p-3 text-right">KAZANÇ</th><th className="p-3 text-right">TUTAR</th><th className="p-3 text-center">SİL</th>
-                  </tr></thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {transactions.length === 0 ? <tr><td colSpan="11" className="p-12 text-center text-slate-400"><span className="block text-base font-semibold text-slate-600 mb-2">Henüz hareket yok</span>Soldan "Alışı Ekle" ile başlayın.</td></tr> :
-                      [...transactions].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t, idx) => {
-                        const mp = marketPrices[t.fundCode] || { value: t.price, date: t.date };
-                        const endDate = mp.date || new Date().toISOString().split('T')[0];
-                        const endPrice = mp.value;
-                        const diffDays = Math.ceil(Math.abs(new Date(endDate) - new Date(t.date)) / 86400000);
-                        const isBuy = t.type === 'buy';
-                        const profit = isBuy ? (endPrice - t.price) * t.quantity : 0;
-                        const annualYield = diffDays > 0 && t.price > 0 ? ((endPrice / t.price - 1) / diffDays) * 365 * 100 : 0;
-                        const amount = t.totalAmount || t.quantity * t.price;
-                        return (
-                          <tr key={t.id} className="hover:bg-slate-50">
-                            <td className="p-3 text-center text-slate-400">{idx + 1}</td>
-                            <td className="p-3 font-extrabold text-indigo-700">{t.fundCode}<span className={`ml-1 text-[10px] font-bold ${isBuy ? 'text-indigo-400' : 'text-rose-400'}`}>{isBuy ? 'ALIŞ' : 'SATIŞ'}</span></td>
-                            <td className="p-3 text-center text-slate-600">{new Date(t.date).toLocaleDateString('tr-TR')}</td>
-                            <td className="p-3 text-center text-slate-600">{new Date(endDate).toLocaleDateString('tr-TR')}</td>
-                            <td className="p-3 text-center font-bold text-slate-700">{diffDays}</td>
-                            <td className="p-3 text-right font-mono text-slate-600">{fmtPrice(t.price)}</td>
-                            <td className="p-3 text-right font-mono text-slate-800">{fmtPrice(endPrice)}</td>
-                            <td className="p-3 text-right font-bold text-slate-600">{isBuy && diffDays > 0 ? `%${annualYield.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}` : '-'}</td>
-                            <td className={`p-3 text-right font-bold ${profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{isBuy ? (profit > 0 ? '+' : '') + fmtCur(profit) : '-'}</td>
-                            <td className={`p-3 text-right font-bold ${isBuy ? 'text-indigo-600' : 'text-rose-600'}`}>{fmtCur(amount)}</td>
-                            <td className="p-3 text-center"><button onClick={() => handleDeleteTransaction(t.id)} className="text-slate-400 hover:text-rose-600 p-1.5 hover:bg-rose-50 rounded-lg"><Trash2 size={16} /></button></td>
-                          </tr>
-                        );
-                      })}
-                  </tbody>
-                </table>
+                <div className="min-w-[820px]">
+                  {positions.length === 0 ? (
+                    <div className="p-12 text-center text-slate-400"><span className="block text-base font-semibold text-slate-600 mb-2">Henüz hareket yok</span>Soldan "Alışı Ekle" ile başlayın.</div>
+                  ) : (
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead><tr className="bg-slate-50 text-slate-500 uppercase tracking-wider border-b border-slate-200">
+                        <th className="p-3 text-left">FON</th><th className="p-3 text-left">DURUM</th><th className="p-3 text-right">İLK ALIŞ</th><th className="p-3 text-right">GÜNCEL</th><th className="p-3 text-center">GÜN</th><th className="p-3 text-right">BAKİYE</th><th className="p-3 text-right">TOPLAM KAZANÇ</th><th className="p-3 text-right">ORAN(YIL)</th><th className="p-3 text-center">DETAY</th>
+                      </tr></thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {positions.map((p) => (
+                          <React.Fragment key={p.code}>
+                            <tr className="hover:bg-slate-50 cursor-pointer" onClick={() => setExpandedFund(expandedFund === p.code ? null : p.code)}>
+                              <td className="p-3 font-extrabold text-indigo-700">{p.code}<div className="text-[10px] text-slate-400 font-normal truncate max-w-[160px]" title={p.name}>{p.name}</div></td>
+                              <td className="p-3"><span className={`text-[11px] font-bold px-2 py-1 rounded whitespace-nowrap ${p.acik ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{p.durum}</span></td>
+                              <td className="p-3 text-right font-mono text-slate-600">{fmtPrice(p.ilkAlis)}</td>
+                              <td className="p-3 text-right font-mono text-slate-800">{fmtPrice(p.guncel)}</td>
+                              <td className="p-3 text-center font-bold text-slate-700">{p.gun}</td>
+                              <td className="p-3 text-right font-bold text-slate-800">{fmtCur(p.bakiye)}</td>
+                              <td className={`p-3 text-right font-bold ${p.kazanc >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{p.kazanc > 0 ? '+' : ''}{fmtCur(p.kazanc)}</td>
+                              <td className={`p-3 text-right font-bold ${p.oran >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>%{p.oran.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</td>
+                              <td className="p-3 text-center text-indigo-600"><ChevronDown size={16} className={`inline transition-transform ${expandedFund === p.code ? 'rotate-180' : ''}`} /></td>
+                            </tr>
+                            {expandedFund === p.code && (
+                              <tr className="bg-slate-50/60">
+                                <td colSpan="9" className="p-4">
+                                  <div className="text-xs font-bold text-slate-500 uppercase mb-2">Gün Gün Döküm — Yuvarlanan Bakiye</div>
+                                  <div className="max-h-80 overflow-y-auto border border-slate-200 rounded-lg bg-white">
+                                    <table className="w-full text-left border-collapse text-[11px]">
+                                      <thead className="sticky top-0 bg-slate-100 text-slate-500 uppercase">
+                                        <tr><th className="p-2 text-left">TARİH</th><th className="p-2 text-right">İŞLEMDEKİ FON BAKİYESİ</th><th className="p-2 text-right">KAPANIŞ FİYATI</th><th className="p-2 text-right">ORAN(YIL)</th><th className="p-2 text-right">KAZANÇ</th><th className="p-2 text-right">TOPLAM TUTAR</th></tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-100">
+                                        {p.ledger.length === 0 ? (
+                                          <tr><td colSpan="6" className="p-4 text-center text-slate-400">Gün gün döküm için fiyat geçmişi yok. "TEFAS Canlı Veri Çek"e basın.</td></tr>
+                                        ) : (
+                                          [...p.ledger].reverse().map((r) => (
+                                            <tr key={r.date} className="hover:bg-slate-50">
+                                              <td className="p-2 text-slate-600 font-medium">{new Date(r.date).toLocaleDateString('tr-TR')}</td>
+                                              <td className="p-2 text-right font-mono text-slate-700">{fmtCur(r.D)}</td>
+                                              <td className="p-2 text-right font-mono text-slate-600">{fmtPrice(r.price)}</td>
+                                              <td className="p-2 text-right font-bold text-slate-600">%{r.oran.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</td>
+                                              <td className={`p-2 text-right font-bold ${r.gain >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.gain > 0 ? '+' : ''}{fmtCur(r.gain)}</td>
+                                              <td className="p-2 text-right font-bold text-slate-800">{fmtCur(r.J)}</td>
+                                            </tr>
+                                          ))
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                  <div className="text-xs font-bold text-slate-500 uppercase mt-4 mb-2">İşlemler (düzeltmek için silebilirsiniz)</div>
+                                  <div className="flex flex-col gap-1">
+                                    {[...p.txs].sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
+                                      <div key={t.id} className="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-3 py-2 text-[11px]">
+                                        <div className="flex items-center gap-3 flex-wrap">
+                                          <span className={`font-bold px-2 py-0.5 rounded ${t.type === 'buy' ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}>{t.type === 'buy' ? 'ALIŞ' : 'SATIŞ'}</span>
+                                          <span className="text-slate-600">{new Date(t.date).toLocaleDateString('tr-TR')}</span>
+                                          <span className="text-slate-500">Fiyat: {fmtPrice(t.price)}</span>
+                                          <span className="text-slate-500">Tutar: {fmtCur(t.totalAmount || t.quantity * t.price)}</span>
+                                          <span className="text-slate-400">Adet: {fmtQty(t.quantity)}</span>
+                                        </div>
+                                        <button onClick={(e) => { e.stopPropagation(); handleDeleteTransaction(t.id); }} className="text-slate-400 hover:text-rose-600 p-1.5 hover:bg-rose-50 rounded-lg"><Trash2 size={14} /></button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  <div className="p-4 text-[10px] text-slate-400">
+                    <strong>Yöntem:</strong> Pozisyon satılana kadar açık kalır; bakiye her kapanışta bir önceki günün üzerine bileşik büyür. İşlemdeki Fon Bakiyesi = dönem başı bakiye · Kazanç = bakiye × (kapanış/önceki − 1) · Toplam Tutar = dönem sonu bakiye · Oran = ((kapanış/önceki − 1) × 365) / gün.
+                  </div>
+                </div>
               )}
             </div>
           </div>
