@@ -210,6 +210,7 @@ function App() {
   const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
   const [txPrice, setTxPrice] = useState('');
   const [txTotalAmount, setTxTotalAmount] = useState('');
+  const [txQty, setTxQty] = useState(''); // satışta: satılacak adet (varsayılan = elindeki)
   const [priceUpdateFund, setPriceUpdateFund] = useState('');
   const [priceUpdateDate, setPriceUpdateDate] = useState(new Date().toISOString().split('T')[0]);
   const [priceUpdateValue, setPriceUpdateValue] = useState('');
@@ -257,6 +258,26 @@ function App() {
       return { ...h, name: fundDetails ? fundDetails.name : '', avgCost, currentPrice: marketData.value, priceDate: marketData.date, currentValue, profitLoss, profitLossPercent: h.totalCost > 0 ? (profitLoss / h.totalCost) * 100 : 0 };
     });
   }, [transactions, marketPrices, definedFunds]);
+
+  // Seçili fonda elde tutulan net pay adedi (alış - satış)
+  const heldShares = useMemo(() => {
+    if (!fundCode) return 0;
+    return transactions.filter((t) => t.fundCode === fundCode).reduce((s, t) => s + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)), 0);
+  }, [fundCode, transactions]);
+
+  // Satış modunda fon seçilince/moda geçilince adedi elindeki adetle doldur
+  useEffect(() => {
+    if (txType === 'sell' && fundCode) {
+      setTxQty(heldShares > 0 ? heldShares.toLocaleString('tr-TR', { useGrouping: false, maximumFractionDigits: 6 }) : '');
+    }
+  }, [txType, fundCode]);
+
+  // Satış tutarı = satılacak adet × satış fiyatı (otomatik)
+  const sellAmount = useMemo(() => {
+    const q = parseTRNumber(txQty), p = parseTRNumber(txPrice);
+    if (!isNaN(q) && !isNaN(p) && q > 0 && p > 0) return q * p;
+    return null;
+  }, [txQty, txPrice]);
 
   const summary = useMemo(() => {
     let totalValue = 0, totalCost = 0;
@@ -319,15 +340,21 @@ function App() {
 
   const handleAddTransaction = (e) => {
     e.preventDefault();
-    if (!fundCode || !txPrice || !txTotalAmount) { showAlert('Eksik Bilgi', 'Lütfen Fon, Fiyat ve Tutar alanlarını doldurun.'); return; }
-    const qty = parseFloat(calculatedQty);
-    if (qty <= 0) { showAlert('Geçersiz Değer', 'Hesaplanan adet sıfırdan büyük olmalıdır.'); return; }
-    if (txType === 'sell') {
-      const owned = (portfolio.find((p) => p.code === fundCode) || {}).quantity || 0;
-      if (qty > owned + 1e-6) { showAlert('Yetersiz Bakiye', `Elinizde ${fundCode} fonundan yalnızca ${owned.toFixed(6)} adet var.`); return; }
+    if (txType === 'buy') {
+      if (!fundCode || !txPrice || !txTotalAmount) { showAlert('Eksik Bilgi', 'Lütfen Fon, Fiyat ve Tutar alanlarını doldurun.'); return; }
+      const qty = parseFloat(calculatedQty);
+      if (!(qty > 0)) { showAlert('Geçersiz Değer', 'Hesaplanan adet sıfırdan büyük olmalıdır.'); return; }
+      setTransactions((prev) => [...prev, { id: newId(), type: 'buy', fundCode, quantity: qty, price: parseTRNumber(txPrice), totalAmount: parseTRNumber(txTotalAmount), date: txDate, createdAt: Date.now() }]);
+    } else {
+      // SATIŞ: adet = elindeki (sabit), tutar = adet × satış fiyatı
+      if (!fundCode || !txPrice || !txQty) { showAlert('Eksik Bilgi', 'Lütfen Fon, Satış Fiyatı ve Satılacak Adet alanlarını doldurun.'); return; }
+      const qty = parseTRNumber(txQty), prc = parseTRNumber(txPrice);
+      if (!(qty > 0)) { showAlert('Geçersiz Değer', 'Satılacak adet sıfırdan büyük olmalıdır.'); return; }
+      if (!(prc > 0)) { showAlert('Geçersiz Değer', 'Satış fiyatı sıfırdan büyük olmalıdır.'); return; }
+      if (qty > heldShares + 1e-6) { showAlert('Yetersiz Bakiye', `Elinizde ${fundCode} fonundan yalnızca ${heldShares.toLocaleString('tr-TR', { maximumFractionDigits: 6 })} adet var.`); return; }
+      setTransactions((prev) => [...prev, { id: newId(), type: 'sell', fundCode, quantity: qty, price: prc, totalAmount: qty * prc, date: txDate, createdAt: Date.now() }]);
     }
-    setTransactions((prev) => [...prev, { id: newId(), type: txType, fundCode, quantity: qty, price: parseTRNumber(txPrice), totalAmount: parseTRNumber(txTotalAmount), date: txDate, createdAt: Date.now() }]);
-    setFundCode(''); setTxPrice(''); setTxTotalAmount('');
+    setFundCode(''); setTxPrice(''); setTxTotalAmount(''); setTxQty('');
   };
 
   const handleAddDefinedFund = (e) => {
@@ -553,11 +580,33 @@ function App() {
                     </select>
                   </div>
                   <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">İşlem Tarihi</label><input type="date" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txDate} onChange={(e) => setTxDate(e.target.value)} required /></div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fiyat (₺/Pay)</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
-                    <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Yatırılan Tutar (₺)' : 'Satış Tutarı (₺)'}</label><input type="text" inputMode="decimal" placeholder="0,00" className={`w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium ${txType === 'buy' ? 'text-indigo-700' : 'text-rose-700'}`} value={txTotalAmount} onChange={(e) => setTxTotalAmount(e.target.value)} required /></div>
-                  </div>
-                  <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{txType === 'buy' ? 'Alınan' : 'Satılan'} Adet (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{calculatedQty}</span><span className="text-slate-400 text-xs">Adet</span></div></div>
+                  {txType === 'buy' ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fiyat (₺/Pay)</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
+                        <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Yatırılan Tutar (₺)</label><input type="text" inputMode="decimal" placeholder="0,00" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-indigo-700" value={txTotalAmount} onChange={(e) => setTxTotalAmount(e.target.value)} required /></div>
+                      </div>
+                      <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Alınan Adet (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{calculatedQty}</span><span className="text-slate-400 text-xs">Adet</span></div></div>
+                    </>
+                  ) : (
+                    <>
+                      {fundCode && (
+                        <div className="bg-rose-50 border border-rose-100 rounded-xl px-4 py-2 text-xs text-rose-700 flex justify-between items-center">
+                          <span className="font-medium">Elinizdeki adet</span>
+                          <span className="font-mono font-bold">{heldShares.toLocaleString('tr-TR', { maximumFractionDigits: 6 })}</span>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Satış Fiyatı (₺/Pay)</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
+                        <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Satılacak Adet</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-rose-700" value={txQty} onChange={(e) => setTxQty(e.target.value)} required /></div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button type="button" onClick={() => setTxQty(heldShares > 0 ? heldShares.toLocaleString('tr-TR', { useGrouping: false, maximumFractionDigits: 6 }) : '')} className="text-[11px] font-semibold text-rose-600 hover:bg-rose-50 px-2 py-1 rounded">Tümünü sat</button>
+                        <span className="text-[11px] text-slate-400">Kısmi satış için adedi düşürebilirsiniz.</span>
+                      </div>
+                      <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Satış Tutarı (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{sellAmount == null ? '0,00' : fmtCur(sellAmount)}</span><span className="text-slate-400 text-xs">= Adet × Fiyat</span></div></div>
+                    </>
+                  )}
                   <button type="submit" className={`w-full font-bold py-3.5 px-6 rounded-xl shadow-sm flex justify-center items-center gap-2 mt-4 text-white ${txType === 'buy' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}><PlusCircle size={20} />{txType === 'buy' ? 'Alışı Ekle' : 'Satışı Ekle'}</button>
                 </form>
               </div>
