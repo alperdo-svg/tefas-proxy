@@ -298,9 +298,12 @@ function App() {
       const firstBuy = txs[0].date;
       // Dönem içinde tutulan pay adedi (tarih <= d olan alış - satış)
       const sharesAsOf = (d) => txs.reduce((s, t) => (t.date <= d ? s + (t.type === 'buy' ? t.quantity : -t.quantity) : s), 0);
-      // Kapanış serisi (ilk alıştan itibaren). İlk alış günü seride yoksa, baş fiyatı = alış fiyatı olarak çapa ekle.
-      let closes = (priceHistory[code] || []).slice().sort((a, b) => a.date.localeCompare(b.date)).filter((h) => h.date >= firstBuy);
-      if (!closes.length || closes[0].date > firstBuy) closes = [{ date: firstBuy, value: txs[0].price }, ...closes];
+      // Zaman çizelgesi: fiyat kapanışları + işlem tarihleri (alış/satış). Böylece her işlem bir satır sınırı olur.
+      const valueByDate = new Map();
+      (priceHistory[code] || []).forEach((h) => { if (h.date >= firstBuy) valueByDate.set(h.date, h.value); });
+      if (!valueByDate.has(firstBuy)) valueByDate.set(firstBuy, txs[0].price);
+      txs.forEach((t) => { if (t.date >= firstBuy && !valueByDate.has(t.date)) valueByDate.set(t.date, t.price); });
+      const closes = Array.from(valueByDate.keys()).sort((a, b) => a.localeCompare(b)).map((d) => ({ date: d, value: valueByDate.get(d) }));
 
       const ledger = [];
       for (let i = 1; i < closes.length; i++) {
@@ -312,13 +315,9 @@ function App() {
         const J = D + gain;                            // Toplam Tutar (dönem sonu)
         const gun = Math.max(1, Math.round((new Date(cur.date) - new Date(prev.date)) / 86400000));
         const oran = prev.value > 0 ? ((cur.value / prev.value - 1) * 365) / gun * 100 : 0;
-        const txOnDate = txs.filter((t) => t.date === cur.date);
-        let durum = 'Tutuluyor';
-        if (txOnDate.some((t) => t.type === 'buy')) durum = 'Ek Alış';
-        if (txOnDate.some((t) => t.type === 'sell')) durum = 'Satış';
-        const isLast = i === closes.length - 1;
-        const txsOnBas = txs.filter((t) => t.date >= prev.date && (t.date < cur.date || (isLast && t.date <= cur.date)));
-        ledger.push({ bas: prev.date, bit: cur.date, D, acilis: prev.value, kapanis: cur.value, gun, oran, gain, J, txsOnBas });
+        // Alış: başladığı satırda (bas) görünür. Satış: bittiği satırda (bit) görünür.
+        const txsOnBas = txs.filter((t) => (t.type === 'buy' && t.date === prev.date) || (t.type === 'sell' && t.date === cur.date));
+        ledger.push({ bas: prev.date, bit: cur.date, D, acilis: prev.value, kapanis: cur.value, gun, oran, gain, J, adet: sharesDuring, txsOnBas });
       }
 
       const netShares = sharesAsOf(closes[closes.length - 1].date);
@@ -737,17 +736,18 @@ function App() {
                                   <div className="max-h-80 overflow-auto border border-slate-200 rounded-lg bg-white">
                                     <table className="w-full text-left border-collapse text-[11px] min-w-[760px]">
                                       <thead className="sticky top-0 bg-slate-100 text-slate-500 uppercase">
-                                        <tr><th className="p-2 text-left">BAŞLANGIÇ</th><th className="p-2 text-left">BİTİŞ</th><th className="p-2 text-right">İŞLEMDEKİ FON BAKİYESİ</th><th className="p-2 text-right">AÇILIŞ FİYATI</th><th className="p-2 text-right">KAPANIŞ FİYATI</th><th className="p-2 text-right">ORAN(YIL)</th><th className="p-2 text-right">KAZANÇ</th><th className="p-2 text-right">TOPLAM TUTAR</th><th className="p-2 text-center">İŞLEM</th></tr>
+                                        <tr><th className="p-2 text-left">BAŞLANGIÇ</th><th className="p-2 text-left">BİTİŞ</th><th className="p-2 text-right">İŞLEMDEKİ FON BAKİYESİ</th><th className="p-2 text-right">ADET</th><th className="p-2 text-right">AÇILIŞ FİYATI</th><th className="p-2 text-right">KAPANIŞ FİYATI</th><th className="p-2 text-right">ORAN(YIL)</th><th className="p-2 text-right">KAZANÇ</th><th className="p-2 text-right">TOPLAM TUTAR</th><th className="p-2 text-center">İŞLEM</th></tr>
                                       </thead>
                                       <tbody className="divide-y divide-slate-100">
                                         {p.ledger.length === 0 ? (
-                                          <tr><td colSpan="9" className="p-4 text-center text-slate-400">Gün gün döküm için fiyat geçmişi yok. "TEFAS Canlı Veri Çek"e basın.</td></tr>
+                                          <tr><td colSpan="10" className="p-4 text-center text-slate-400">Gün gün döküm için fiyat geçmişi yok. "TEFAS Canlı Veri Çek"e basın.</td></tr>
                                         ) : (
                                           [...p.ledger].reverse().map((r) => (
                                             <tr key={r.bit} className="hover:bg-slate-50">
                                               <td className="p-2 text-slate-600 font-medium whitespace-nowrap">{new Date(r.bas).toLocaleDateString('tr-TR')}</td>
                                               <td className="p-2 text-slate-600 font-medium whitespace-nowrap">{new Date(r.bit).toLocaleDateString('tr-TR')}</td>
                                               <td className="p-2 text-right font-mono text-slate-700">{fmtCur(r.D)}</td>
+                                              <td className="p-2 text-right font-mono text-slate-500">{r.adet != null ? r.adet.toLocaleString('tr-TR', { maximumFractionDigits: 6 }) : '-'}</td>
                                               <td className="p-2 text-right font-mono text-slate-500">{fmtPrice(r.acilis)}</td>
                                               <td className="p-2 text-right font-mono text-slate-700">{fmtPrice(r.kapanis)}</td>
                                               <td className="p-2 text-right font-bold text-slate-600">%{r.oran.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</td>
