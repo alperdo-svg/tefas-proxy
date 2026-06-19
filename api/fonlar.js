@@ -72,36 +72,32 @@ module.exports = async (req, res) => {
   const fundType = String(q.fontip || 'YAT');
   const sfonTurKod = q.sfonturkod ? String(q.sfonturkod) : null;
   const debug = q.debug === '1';
-  // islem belirtilmezse İKİ kovayı da çek (gören + görmeyen). Belirtilirse sadece onu.
-  const buckets = q.islem != null ? [parseInt(q.islem, 10)] : [1, 2];
+  // islem belirtilmezse İKİ kovayı da çek: 1=işlem gören, 0=işlem görmeyen (serbest vб., örn. GJH)
+  const buckets = q.islem != null ? [parseInt(q.islem, 10)] : [1, 0];
 
   const byCode = new Map();
   const meta = [];
-  try {
-    for (const islem of buckets) {
-      let resp;
-      try { resp = await fetchBucket(fundType, sfonTurKod, islem); }
-      catch (e) { meta.push({ islem, error: String(e) }); continue; }
-      meta.push({ islem, status: resp.status, count: resp.arr.length, sample: resp.ok ? undefined : resp.sample });
-      for (const f of resp.arr) {
-        const kod = f.fonKodu || '';
-        if (!kod) continue;
-        // Önce gören (islem=1) işlenir; varsa tefas=true kalır, çakışırsa görene öncelik
-        if (!byCode.has(kod)) {
-          byCode.set(kod, {
-            kod, ad: f.fonUnvan || '', tur: f.fonTurAciklama || '',
-            tefas: islem === 1,
-            risk: f.riskDegeri != null ? String(f.riskDegeri) : '',
-            g1a: num(f.getiri1a), g3a: num(f.getiri3a), g6a: num(f.getiri6a),
-            gyb: num(f.getiriyb), g1y: num(f.getiri1y), g3y: num(f.getiri3y), g5y: num(f.getiri5y),
-          });
-        }
-      }
+
+  // İki kovayı PARALEL çek (zaman aşımını önlemek için). Biri hata verse diğeri yaşar.
+  const results = await Promise.allSettled(buckets.map((islem) => fetchBucket(fundType, sfonTurKod, islem)));
+
+  results.forEach((settled, i) => {
+    const islem = buckets[i];
+    if (settled.status !== 'fulfilled') { meta.push({ islem, error: String(settled.reason) }); return; }
+    const resp = settled.value;
+    meta.push({ islem, status: resp.status, count: resp.arr.length, sample: resp.ok ? undefined : resp.sample });
+    for (const f of resp.arr) {
+      const kod = f.fonKodu || '';
+      if (!kod || byCode.has(kod)) continue; // görene (islem=1) öncelik
+      byCode.set(kod, {
+        kod, ad: f.fonUnvan || '', tur: f.fonTurAciklama || '',
+        tefas: islem === 1,
+        risk: f.riskDegeri != null ? String(f.riskDegeri) : '',
+        g1a: num(f.getiri1a), g3a: num(f.getiri3a), g6a: num(f.getiri6a),
+        gyb: num(f.getiriyb), g1y: num(f.getiri1y), g3y: num(f.getiri3y), g5y: num(f.getiri5y),
+      });
     }
-  } catch (e) {
-    res.status(502).json({ ok: false, error: 'TEFAS isteği başarısız: ' + String(e) });
-    return;
-  }
+  });
 
   const funds = Array.from(byCode.values());
   if (debug) { res.status(200).json({ ok: true, buckets: meta, total: funds.length, sample: funds.slice(0, 3) }); return; }
