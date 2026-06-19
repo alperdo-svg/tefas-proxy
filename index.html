@@ -230,8 +230,11 @@ function App() {
   const [scrSort, setScrSort] = useState({ key: 'g1y', dir: 'desc' });
   const [reportSub, setReportSub] = useState('getiri'); // getiri | analiz
   const [anType, setAnType] = useState('Para Piyasası'); // Fon Analiz: karşılaştırma türü
-  const [derinInfo, setDerinInfo] = useState(false); // Faz 1 teorik bilgi kutusu açık mı
+  const [derinInfo, setDerinInfo] = useState(false); // Risk & Performans: metrik açıklama kutusu açık mı
   const [derinExpanded, setDerinExpanded] = useState(null); // yorumu açık olan fon kodu
+  const [rfRate, setRfRate] = useState('50'); // risksiz getiri (yıllık %), kullanıcı girer
+  const [raWindow, setRaWindow] = useState(1); // risk-ayarlı hesap penceresi (yıl): 1 | 2 | 3
+  const [raExpanded, setRaExpanded] = useState(null); // risk-ayarlı yorum açık fon
   const [modalConfig, setModalConfig] = useState({ isOpen: false, title: '', message: '', onConfirm: null, isAlert: true });
   const [isFetching, setIsFetching] = useState(false);
 
@@ -564,7 +567,7 @@ function App() {
     return [...s].sort((a, b) => a.localeCompare(b, 'tr'));
   }, [scrFunds]);
 
-  // DERİN ANALİZ (Faz 1) — fonun kendi günlük fiyat geçmişinden volatilite + Max Drawdown
+  // RİSK & PERFORMANS → Risk Metrikleri — fonun günlük fiyat geçmişinden volatilite + Max Drawdown
   const derin = useMemo(() => {
     const out = [];
     Object.keys(priceHistory || {}).forEach((code) => {
@@ -591,6 +594,41 @@ function App() {
     });
     return out.sort((a, b) => (a.insufficient ? 1 : 0) - (b.insufficient ? 1 : 0) || (b.volAnnual || 0) - (a.volAnnual || 0));
   }, [priceHistory, definedFunds]);
+
+  // RİSK & PERFORMANS → Risk-Ayarlı Getiri (Sharpe + Sortino), seçilen pencere + kullanıcı Rf'si
+  const riskAdj = useMemo(() => {
+    const rf = parseTRNumber(rfRate); // yıllık %
+    const rfOk = !isNaN(rf) && rf >= 0;
+    const out = [];
+    Object.keys(priceHistory || {}).forEach((code) => {
+      let series = [...(priceHistory[code] || [])].filter((p) => p && p.value > 0).sort((a, b) => a.date.localeCompare(b.date));
+      if (series.length >= 2) {
+        const endD = new Date(series[series.length - 1].date);
+        const cut = new Date(endD); cut.setFullYear(cut.getFullYear() - raWindow);
+        const cutISO = cut.toISOString().split('T')[0];
+        series = series.filter((p) => p.date >= cutISO);
+      }
+      const name = (definedFunds.find((d) => d.code === code) || {}).name || '';
+      if (!rfOk) { out.push({ code, name, n: series.length, noRf: true }); return; }
+      if (series.length < 20) { out.push({ code, name, n: series.length, insufficient: true }); return; }
+      const rets = []; for (let i = 1; i < series.length; i++) rets.push(series[i].value / series[i - 1].value - 1);
+      const nR = rets.length;
+      const RpAnnual = (Math.pow(series[series.length - 1].value / series[0].value, 252 / nR) - 1) * 100;
+      const meanD = rets.reduce((s, v) => s + v, 0) / nR;
+      const sdDaily = Math.sqrt(rets.reduce((s, v) => s + (v - meanD) ** 2, 0) / (nR - 1));
+      const annVol = sdDaily * Math.sqrt(252) * 100;
+      const marD = rf / 100 / 252; // günlük hedef (risksiz) getiri
+      const downSq = rets.reduce((s, v) => { const d = Math.min(0, v - marD); return s + d * d; }, 0) / nR;
+      const annDown = Math.sqrt(downSq) * Math.sqrt(252) * 100;
+      const excess = RpAnnual - rf;
+      const sharpe = annVol > 0.0001 ? excess / annVol : null;
+      let sortino = null, sortinoInf = false;
+      if (annDown > 0.0001) sortino = excess / annDown;
+      else if (excess > 0) sortinoInf = true;
+      out.push({ code, name, n: series.length, start: series[0].date, end: series[series.length - 1].date, RpAnnual, annVol, annDown, sharpe, sortino, sortinoInf, excess });
+    });
+    return out.sort((a, b) => (a.insufficient || a.noRf ? 1 : 0) - (b.insufficient || b.noRf ? 1 : 0) || ((b.sharpe == null ? -99 : b.sharpe) - (a.sharpe == null ? -99 : a.sharpe)));
+  }, [priceHistory, definedFunds, rfRate, raWindow]);
 
   const fmtPct2 = (v) => (v == null ? '—' : (v < 0 ? '-' : '') + '%' + Math.abs(v).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
@@ -627,6 +665,29 @@ function App() {
     else sonuc = 'Orta üzeri dalgalanma taşır; düşüş dönemlerine tahammül gerektirir.';
     return `${d.code}, ${sure} fiyat geçmişinde ${volTxt} göstermiş (yıllık ≈${fmtPct2(v)}) — ${profil} bir profil. En kötü döneminde zirveden ${fmtPct2(m)} geriledi (${d.mddPeak} → ${d.mddTrough}); yani ${ddTxt}. ${sonuc}`;
   };
+
+  const fmtNum2 = (v) => (v == null ? '—' : v.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+
+  // Risk-ayarlı getiri için dinamik yorum
+  const riskAdjYorum = (d) => {
+    if (d.noRf) return 'Önce geçerli bir risksiz getiri oranı girin.';
+    if (d.insufficient) return `Seçilen pencerede yeterli veri yok (${d.n} gün). Daha uzun fiyat geçmişi çekin veya pencereyi kısaltın.`;
+    const s = d.sharpe;
+    const rf = parseTRNumber(rfRate);
+    let ana;
+    if (s == null) ana = 'Oynaklığı çok düşük olduğu için Sharpe anlamlı hesaplanamadı (neredeyse risksiz bir seyir).';
+    else if (s < 0) ana = `Risksiz getirinin (yıllık %${fmtNum2(rf)}) ALTINDA kalmış. Bu dönemde fona girmek yerine risksiz faizde kalmak daha kârlıydı.`;
+    else if (s < 1) ana = 'Pozitif ama düşük risk-ayarlı getiri: aldığı dalgalanmaya karşılık getirisi sınırlı kalmış.';
+    else if (s < 2) ana = 'İyi bir risk-ayarlı getiri: aldığı riske değen, dengeli bir performans üretmiş.';
+    else ana = 'Çok güçlü risk-ayarlı getiri: riske kıyasla istisnai bir performans (nadir görülür).';
+    let sort = '';
+    if (d.sortinoInf) sort = ' Sortino çok yüksek — incelenen pencerede hedefin altına neredeyse hiç düşmemiş (düşüş riski yok denecek kadar az).';
+    else if (d.sortino != null && s != null && d.sortino > s * 1.3) sort = ' Sortino, Sharpe’tan belirgin yüksek: dalgalanmasının çoğu yukarı yönlü, düşüşleri sınırlı olmuş.';
+    else if (d.sortino != null && s != null && d.sortino < s * 0.9) sort = ' Sortino, Sharpe’ın altında: dalgalanmasında aşağı yönlü düşüşlerin payı yüksek.';
+    return `${d.code} (yıllık getiri ≈${fmtPct2(d.RpAnnual)}, oynaklık ≈${fmtPct2(d.annVol)}). ${ana}${sort}`;
+  };
+
+  const sharpeColor = (s) => (s == null ? 'text-slate-400' : s < 0 ? 'text-rose-600' : s < 1 ? 'text-amber-600' : s < 2 ? 'text-emerald-600' : 'text-emerald-700');
 
   const exportScreener = () => {
     if (!scrFiltered.length) { showAlert('Veri Yok', 'Önce fon listesi gelsin.'); return; }
@@ -921,7 +982,7 @@ function App() {
             <div className="inline-flex bg-slate-100 rounded-xl p-1 mb-6 gap-1">
               <button onClick={() => setReportSub('getiri')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'getiri' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Fon Getiri</button>
               <button onClick={() => setReportSub('analiz')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'analiz' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Fon Analiz</button>
-              <button onClick={() => setReportSub('derin')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'derin' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Derin Analiz</button>
+              <button onClick={() => setReportSub('derin')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'derin' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Risk &amp; Performans</button>
             </div>
 
             {reportSub === 'getiri' && (
@@ -1096,11 +1157,11 @@ function App() {
             {reportSub === 'derin' && (
             <div>
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 mb-5">
-                <div className="flex items-center gap-2 mb-2"><TrendingUp size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Derin Analiz — Risk Metrikleri</h2></div>
+                <div className="flex items-center gap-2 mb-2"><TrendingUp size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Risk Metrikleri</h2></div>
                 <p className="text-sm text-slate-500 leading-relaxed">Takip ettiğiniz fonların <b>günlük fiyat geçmişinden</b> hesaplanır: yıllık oynaklık (volatilite) ve maksimum düşüş (drawdown). Dış veri gerektirmez. Veri yoksa ya da eskiyse Portföyüm sekmesindeki <b>"TEFAS Canlı Veri Çek"</b> ile fiyat geçmişini güncelleyin.</p>
                 <button onClick={handleAutoFetch} disabled={isFetching} className="mt-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold py-2 px-4 rounded-xl shadow-sm flex items-center gap-2 text-sm"><RefreshCw size={15} className={isFetching ? 'animate-spin' : ''} /> {isFetching ? 'Veri çekiliyor…' : 'Fiyat geçmişini güncelle (5 yıl)'}</button>
 
-                <button onClick={() => setDerinInfo((s) => !s)} className="mt-3 ml-2 text-indigo-600 hover:bg-indigo-50 font-bold py-2 px-3 rounded-xl text-sm inline-flex items-center gap-1"><Info size={15} /> Faz 1 nasıl çalışır? {derinInfo ? '▲' : '▼'}</button>
+                <button onClick={() => setDerinInfo((s) => !s)} className="mt-3 ml-2 text-indigo-600 hover:bg-indigo-50 font-bold py-2 px-3 rounded-xl text-sm inline-flex items-center gap-1"><Info size={15} /> Bu metrikler nasıl hesaplanır? {derinInfo ? '▲' : '▼'}</button>
 
                 {derinInfo && (
                   <div className="mt-4 bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-600 leading-relaxed space-y-3">
@@ -1184,6 +1245,79 @@ function App() {
                 </div>
               </div>
               )}
+
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 mt-6 mb-5">
+                <div className="flex items-center gap-2 mb-2"><BarChart3 size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Risk-Ayarlı Getiri</h2></div>
+                <p className="text-sm text-slate-500 leading-relaxed mb-3">Fon, aldığı riske <b>değecek</b> bir getiri üretti mi? <b>Sharpe</b> toplam dalgalanmaya, <b>Sortino</b> yalnızca aşağı yönlü düşüşe göre ölçer. İkisi de fon getirisinden <b>risksiz getiriyi</b> düşer; o yüzden risksiz oranı siz girersiniz.</p>
+                <div className="flex flex-wrap items-end gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Risksiz Getiri (yıllık %)</label>
+                    <input type="text" inputMode="decimal" value={rfRate} onChange={(e) => setRfRate(e.target.value)} placeholder="örn. 50" className="w-32 border border-slate-200 bg-slate-50 rounded-xl px-4 py-2.5 outline-none font-bold text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Hesap Penceresi</label>
+                    <div className="inline-flex bg-slate-100 rounded-xl p-1 gap-1">
+                      {[1, 2, 3].map((y) => <button key={y} onClick={() => setRaWindow(y)} className={`px-3 py-1.5 rounded-lg text-sm font-bold ${raWindow === y ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{y} yıl</button>)}
+                    </div>
+                  </div>
+                  <span className="text-xs text-slate-400 pb-2">Risksiz oran için TCMB faizi / gösterge mevduat ya da bir para piyasası fonunun yıllık getirisi kullanılabilir.</span>
+                </div>
+              </div>
+
+              {riskAdj.length === 0 ? (
+                <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center text-slate-400">Önce fiyat geçmişi çekin (yukarıdaki "Fiyat geçmişini güncelle").</div>
+              ) : (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-sm min-w-[820px]">
+                    <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider text-xs border-b border-slate-200">
+                      <tr>
+                        <th className="p-3">Fon</th>
+                        <th className="p-3 text-center">Pencere</th>
+                        <th className="p-3 text-right">Yıllık Getiri</th>
+                        <th className="p-3 text-right">Yıllık Vol.</th>
+                        <th className="p-3 text-right">Sharpe</th>
+                        <th className="p-3 text-right">Sortino</th>
+                        <th className="p-3 text-center">Yorum</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {riskAdj.map((d) => {
+                        const owned = ownedCodes.has(d.code);
+                        if (d.noRf) return (<tr key={d.code} className="hover:bg-slate-50"><td className="p-3"><span className="font-extrabold text-indigo-700">{owned && <span className="text-amber-500 mr-1">★</span>}{d.code}</span></td><td className="p-3 text-center text-amber-600" colSpan="6">Risksiz getiri oranını girin (örn. 50)</td></tr>);
+                        if (d.insufficient) return (<tr key={d.code} className="hover:bg-slate-50"><td className="p-3"><span className="font-extrabold text-indigo-700">{owned && <span className="text-amber-500 mr-1">★</span>}{d.code}</span> <span className="text-slate-500 text-xs">{d.name}</span></td><td className="p-3 text-center text-slate-400" colSpan="6">Bu pencerede yetersiz veri ({d.n} gün)</td></tr>);
+                        const isOpen = raExpanded === d.code;
+                        return (
+                          <React.Fragment key={d.code}>
+                          <tr className={owned ? 'bg-indigo-50/40 hover:bg-indigo-50' : 'hover:bg-slate-50'}>
+                            <td className="p-3"><span className="font-extrabold text-indigo-700">{owned && <span className="text-amber-500 mr-1">★</span>}{d.code}</span> <span className="text-slate-500 text-xs max-w-[170px] inline-block truncate align-bottom" title={d.name}>{d.name}</span></td>
+                            <td className="p-3 text-center text-slate-400 text-xs whitespace-nowrap">{raWindow} yıl<br />{d.n} gün</td>
+                            <td className={`p-3 text-right font-bold ${d.RpAnnual >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct2(d.RpAnnual)}</td>
+                            <td className="p-3 text-right font-bold text-slate-600">{fmtPct2(d.annVol)}</td>
+                            <td className={`p-3 text-right font-extrabold ${sharpeColor(d.sharpe)}`}>{fmtNum2(d.sharpe)}</td>
+                            <td className={`p-3 text-right font-extrabold ${d.sortinoInf ? 'text-emerald-700' : sharpeColor(d.sortino)}`}>{d.sortinoInf ? 'Çok yüksek' : fmtNum2(d.sortino)}</td>
+                            <td className="p-3 text-center"><button onClick={() => setRaExpanded(isOpen ? null : d.code)} className="text-indigo-600 hover:bg-indigo-50 rounded-lg px-2 py-1 text-xs font-bold whitespace-nowrap">{isOpen ? 'Gizle ▲' : 'Yorum ▼'}</button></td>
+                          </tr>
+                          {isOpen && (
+                            <tr className="bg-indigo-50/30"><td colSpan="7" className="px-4 pb-4 pt-1">
+                              <div className="bg-white border border-indigo-100 rounded-xl p-3 text-sm text-slate-700 leading-relaxed flex gap-2">
+                                <Info size={16} className="text-indigo-500 shrink-0 mt-0.5" />
+                                <div>{riskAdjYorum(d)} <span className="block mt-1 text-[11px] text-slate-400">Otomatik yorum; bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.</span></div>
+                              </div>
+                            </td></tr>
+                          )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="p-4 text-xs text-slate-500 border-t border-slate-100 leading-relaxed">
+                  <b className="text-slate-700">Sharpe</b> = (yıllık getiri − risksiz getiri) ÷ yıllık oynaklık. <b>1'in üzeri iyi, 2'nin üzeri mükemmel</b>; negatifse risksiz faizde kalmak daha kârlıydı demektir. &nbsp;<b className="text-slate-700">Sortino</b> aynı mantık ama paydada yalnızca <b>aşağı yönlü</b> dalgalanma var (yükselişleri cezalandırmaz); genelde Sharpe'tan yüksek çıkar, ne kadar yüksekse düşüşlere o kadar dirençlidir.
+                </div>
+              </div>
+              )}
+
             </div>
             )}
           </div>
