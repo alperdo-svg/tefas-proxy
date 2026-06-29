@@ -5,6 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Fon Getiri Paneli</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script>
+/* Kurumsal Lacivert tema — indigo→lacivert, emerald/rose→mat tonlar (tüm sınıflar otomatik yeniden renklenir) */
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        indigo: { 50:'#EEF3F8',100:'#D6E2EE',200:'#AEC5DC',300:'#7E9FC2',400:'#4E78A2',500:'#2F5784',600:'#1E3A5F',700:'#18304E',800:'#13273E',900:'#0E1C2D' },
+        emerald:{ 50:'#ECF5EF',100:'#CDE6D6',200:'#A6D3B6',300:'#74B98E',400:'#479B6A',500:'#2F855A',600:'#287049',700:'#205B3B',800:'#19452D',900:'#103020' },
+        rose:   { 50:'#FBECEC',100:'#F4CFCF',200:'#E9A8A8',300:'#DB7A7A',400:'#CC5151',500:'#C53030',600:'#A82A2A',700:'#8A2222',800:'#6B1B1B',900:'#4D1313' },
+      },
+    },
+  },
+};
+</script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
@@ -233,6 +247,7 @@ function App() {
   const [derinInfo, setDerinInfo] = useState(false); // Risk & Performans: metrik açıklama kutusu açık mı
   const [derinExpanded, setDerinExpanded] = useState(null); // yorumu açık olan fon kodu
   const [rfRate, setRfRate] = useState('50'); // risksiz getiri (yıllık %), kullanıcı girer
+  const [histSub, setHistSub] = useState('islemler'); // Geçmiş Defteri: islemler | bakiye
   const [raWindow, setRaWindow] = useState(1); // risk-ayarlı hesap penceresi (yıl): 1 | 2 | 3
   const [raExpanded, setRaExpanded] = useState(null); // risk-ayarlı yorum açık fon
   const [modalConfig, setModalConfig] = useState({ isOpen: false, title: '', message: '', onConfirm: null, isAlert: true });
@@ -668,6 +683,27 @@ function App() {
 
   const fmtNum2 = (v) => (v == null ? '—' : v.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
+  // GEÇMİŞ DEFTERİ — düz işlem listesi (aktif fonlar üstte, sonra en yeni tarih) + parçalı işaretleme
+  const islemListesi = useMemo(() => {
+    const net = {};
+    transactions.forEach((t) => { net[t.fundCode] = (net[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
+    const openCodes = new Set(Object.keys(net).filter((c) => net[c] > 0.000001));
+    const key = (t) => t.fundCode + '|' + t.date + '|' + t.type;
+    const cnt = {};
+    transactions.forEach((t) => { cnt[key(t)] = (cnt[key(t)] || 0) + 1; });
+    const nameOf = (c) => (definedFunds.find((d) => d.code === c) || {}).name || '';
+    return transactions
+      .map((t) => ({ ...t, name: nameOf(t.fundCode), open: openCodes.has(t.fundCode), parcali: cnt[key(t)] > 1 }))
+      .sort((a, b) => (b.open ? 1 : 0) - (a.open ? 1 : 0) || b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0));
+  }, [transactions, definedFunds]);
+
+  const eldeKalan = useMemo(() => {
+    const net = {};
+    transactions.forEach((t) => { net[t.fundCode] = (net[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
+    return Object.keys(net).map((c) => ({ code: c, net: net[c], open: net[c] > 0.000001 }))
+      .sort((a, b) => (b.open ? 1 : 0) - (a.open ? 1 : 0) || a.code.localeCompare(b.code));
+  }, [transactions]);
+
   // Risk-ayarlı getiri için dinamik yorum
   const riskAdjYorum = (d) => {
     if (d.noRf) return 'Önce geçerli bir risksiz getiri oranı girin.';
@@ -874,6 +910,50 @@ function App() {
                 </table>
               ) : (
                 <div className="min-w-[820px]">
+                  <div className="px-4 pt-4 pb-1">
+                    <div className="inline-flex bg-slate-100 rounded-xl p-1 gap-1">
+                      <button onClick={() => setHistSub('islemler')} className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${histSub === 'islemler' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>İşlemler</button>
+                      <button onClick={() => setHistSub('bakiye')} className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${histSub === 'bakiye' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Yuvarlanan Bakiye</button>
+                    </div>
+                  </div>
+                  {histSub === 'islemler' && (
+                    <div className="p-4">
+                      {islemListesi.length === 0 ? (
+                        <div className="p-8 text-center text-slate-400">Henüz işlem yok. Soldan "Alışı Ekle" ile başlayın.</div>
+                      ) : (
+                        <>
+                          <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-2">Elde kalan</div>
+                          <div className="flex flex-wrap gap-2 mb-4">
+                            {eldeKalan.map((e) => (
+                              <span key={e.code} className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs"><b className="text-indigo-700">{e.code}</b> · {fmtQty(e.net)} adet · <span className={`font-bold ${e.open ? 'text-emerald-600' : 'text-slate-400'}`}>{e.open ? 'Açık' : 'Kapalı'}</span></span>
+                            ))}
+                          </div>
+                          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                            <table className="w-full text-left border-collapse text-sm">
+                              <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider text-xs border-b border-slate-200">
+                                <tr><th className="p-3">Tarih</th><th className="p-3">Fon</th><th className="p-3">İşlem</th><th className="p-3 text-right">Adet</th><th className="p-3 text-right">Fiyat</th><th className="p-3 text-right">Tutar</th><th className="p-3 text-center"></th></tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100">
+                                {islemListesi.map((t) => (
+                                  <tr key={t.id} className="hover:bg-slate-50">
+                                    <td className="p-3 text-slate-600 whitespace-nowrap">{new Date(t.date).toLocaleDateString('tr-TR')}</td>
+                                    <td className="p-3"><span className="font-extrabold text-indigo-700">{t.fundCode}</span> <span className="text-[11px] text-slate-400 max-w-[150px] inline-block truncate align-bottom" title={t.name}>{t.name}</span></td>
+                                    <td className="p-3"><span className={`text-[11px] font-bold px-2 py-0.5 rounded ${t.type === 'buy' ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}>{t.type === 'buy' ? 'ALIŞ' : 'SATIŞ'}</span>{t.parcali && <span className="text-[10px] text-slate-400 ml-1">parçalı</span>}</td>
+                                    <td className="p-3 text-right font-mono text-slate-700">{fmtQty(t.quantity)}</td>
+                                    <td className="p-3 text-right font-mono text-slate-600">{fmtPrice(t.price)}</td>
+                                    <td className="p-3 text-right font-bold text-slate-800">{fmtCur(t.totalAmount)}</td>
+                                    <td className="p-3 text-center"><button onClick={() => handleDeleteTransaction(t.id)} title="İşlemi sil" className="text-slate-400 hover:text-rose-600 p-1 hover:bg-rose-50 rounded"><Trash2 size={14} /></button></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {histSub === 'bakiye' && (
+                  <>
                   {positions.length === 0 ? (
                     <div className="p-12 text-center text-slate-400"><span className="block text-base font-semibold text-slate-600 mb-2">Henüz hareket yok</span>Soldan "Alışı Ekle" ile başlayın.</div>
                   ) : (
@@ -948,6 +1028,8 @@ function App() {
                   <div className="p-4 text-[10px] text-slate-400">
                     <strong>Yöntem:</strong> Pozisyon satılana kadar açık kalır; bakiye her kapanışta bir önceki günün üzerine bileşik büyür. İşlemdeki Fon Bakiyesi = dönem başı bakiye · Kazanç = bakiye × (kapanış/önceki − 1) · Toplam Tutar = dönem sonu bakiye · Oran = ((kapanış/önceki − 1) × 365) / gün.
                   </div>
+                  </>
+                  )}
                 </div>
               )}
             </div>
