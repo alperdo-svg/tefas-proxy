@@ -246,6 +246,11 @@ function App() {
   const [scrSort, setScrSort] = useState({ key: 'g1y', dir: 'desc' });
   const [reportSub, setReportSub] = useState('getiri'); // getiri | analiz
   const [scrFavOnly, setScrFavOnly] = useState(false); // Yatırım Fonları: sadece favoriler
+  const [detailFund, setDetailFund] = useState(null); // açık fon detayı
+  const [detailHist, setDetailHist] = useState(null); // detay fiyat geçmişi [{date,value}]
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailErr, setDetailErr] = useState('');
+  const [detailPeriod, setDetailPeriod] = useState('1y'); // grafik dönemi
   const [anType, setAnType] = useState('Para Piyasası'); // Fon Analiz: karşılaştırma türü
   const [derinInfo, setDerinInfo] = useState(false); // Risk & Performans: metrik açıklama kutusu açık mı
   const [derinExpanded, setDerinExpanded] = useState(null); // yorumu açık olan fon kodu
@@ -460,6 +465,55 @@ function App() {
     setFavorites((prev) => prev.includes(kod) ? prev.filter((c) => c !== kod) : [...prev, kod]);
     setDefinedFunds((prev) => prev.find((f) => f.code === kod) ? prev : [...prev, { code: kod, name: ad || kod }]);
   };
+
+  // FON DETAY (Aşama 1) — tıklanan fonun günlük fiyat geçmişini çek
+  const openDetail = async (f) => {
+    setDetailFund(f); setDetailErr(''); setDetailPeriod('1y');
+    if (priceHistory[f.kod] && priceHistory[f.kod].length > 1) { setDetailHist(priceHistory[f.kod]); return; }
+    setDetailHist(null); setDetailLoading(true);
+    try {
+      const r = await fetchTefasFund(f.kod);
+      if (r && r.history && r.history.length) {
+        const hist = r.history.map((h) => ({ date: h.date, value: h.price })).filter((x) => x.value > 0).sort((a, b) => a.date.localeCompare(b.date));
+        setDetailHist(hist);
+        setPriceHistory((prev) => ({ ...prev, [f.kod]: hist }));
+      } else { setDetailErr('Bu fon için fiyat geçmişi alınamadı.'); setDetailHist([]); }
+    } catch (e) { setDetailErr('Veri çekilemedi (TEFAS dakikada ~6 istek sınırı koyar; birkaç saniye sonra tekrar deneyin).'); setDetailHist([]); }
+    setDetailLoading(false);
+  };
+  const closeDetail = () => { setDetailFund(null); setDetailHist(null); setDetailErr(''); };
+
+  const detailChartData = useMemo(() => {
+    if (!detailHist || !detailHist.length) return [];
+    const days = { '1a': 30, '3a': 90, '6a': 180, '1y': 365, '3y': 1095, '5y': 1e7 }[detailPeriod] || 365;
+    const cut = Date.now() - days * 86400000;
+    const filt = detailHist.filter((d) => new Date(d.date).getTime() >= cut);
+    return filt.length > 1 ? filt : detailHist;
+  }, [detailHist, detailPeriod]);
+
+  const detailRisk = useMemo(() => {
+    const s = detailHist; if (!s || s.length < 20) return null;
+    const rets = [];
+    for (let i = 1; i < s.length; i++) { const p0 = s[i - 1].value, p1 = s[i].value; if (p0 > 0 && p1 > 0) rets.push(p1 / p0 - 1); }
+    if (rets.length < 15) return null;
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const sd = Math.sqrt(rets.reduce((a, b) => a + (b - mean) * (b - mean), 0) / rets.length);
+    const annVol = sd * Math.sqrt(252) * 100;
+    const days = (new Date(s[s.length - 1].date) - new Date(s[0].date)) / 86400000;
+    const years = days / 365;
+    const totRet = s[s.length - 1].value / s[0].value;
+    const RpAnnual = years > 0.05 ? (Math.pow(totRet, 1 / years) - 1) * 100 : null;
+    let peak = s[0].value, maxDD = 0, ddDate = '';
+    s.forEach((d) => { if (d.value > peak) peak = d.value; const dd = (d.value - peak) / peak * 100; if (dd < maxDD) { maxDD = dd; ddDate = d.date; } });
+    const rf = parseFloat(rfRate) || 0;
+    const rfDaily = Math.pow(1 + rf / 100, 1 / 252) - 1;
+    const excess = RpAnnual != null ? RpAnnual - rf : null;
+    const downSq = rets.reduce((a, b) => { const d = Math.min(0, b - rfDaily); return a + d * d; }, 0) / rets.length;
+    const annDown = Math.sqrt(downSq) * Math.sqrt(252) * 100;
+    const sharpe = (excess != null && annVol > 0.0001) ? excess / annVol : null;
+    const sortino = (excess != null && annDown > 0.0001) ? excess / annDown : null;
+    return { annVol, RpAnnual, maxDD, ddDate, sharpe, sortino, n: s.length, start: s[0].date, end: s[s.length - 1].date };
+  }, [detailHist, rfRate]);
 
   const fmtCur = (v) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(v);
   const fmtPrice = (v) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY', minimumFractionDigits: 6, maximumFractionDigits: 6 }).format(v);
@@ -1080,6 +1134,60 @@ function App() {
 
             {reportSub === 'getiri' && (
             <div>
+            {detailFund && (
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+                <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex items-start justify-between flex-wrap gap-3">
+                  <div className="flex items-start gap-3">
+                    <button onClick={closeDetail} className="mt-1 text-slate-500 hover:text-indigo-600 text-sm font-bold whitespace-nowrap">← Geri</button>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-2xl font-extrabold text-indigo-700">{detailFund.kod}</h2>
+                        <button onClick={() => toggleFav(detailFund.kod, detailFund.ad)} title="Favori" className={`text-xl leading-none ${favSet.has(detailFund.kod) ? 'text-amber-500' : 'text-slate-300 hover:text-amber-400'}`}>★</button>
+                      </div>
+                      <div className="text-sm text-slate-600 max-w-[520px]">{detailFund.ad}</div>
+                      <div className="text-xs text-slate-400 mt-1">{detailFund.tur} · Risk {detailFund.risk || '-'} · {detailFund.tefas ? "TEFAS'ta işlem görüyor" : 'İşlem görmüyor'}</div>
+                    </div>
+                  </div>
+                  <button onClick={() => { setDefinedFunds((prev) => prev.find((f) => f.code === detailFund.kod) ? prev : [...prev, { code: detailFund.kod, name: detailFund.ad }]); setActiveTab('portfolio'); }} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-xl shadow-sm text-sm whitespace-nowrap">Portföye Al</button>
+                </div>
+
+                <div className="p-5 border-b border-slate-100">
+                  <div className="text-xs font-bold text-slate-500 uppercase mb-2">Getiri</div>
+                  <div className="flex flex-wrap gap-x-6 gap-y-3 text-sm">
+                    {[['1 Ay', detailFund.g1a], ['3 Ay', detailFund.g3a], ['6 Ay', detailFund.g6a], ['Yılbaşı', detailFund.gyb], ['1 Yıl', detailFund.g1y], ['3 Yıl', detailFund.g3y], ['5 Yıl', detailFund.g5y]].map(([l, v]) => (
+                      <div key={l}><div className="text-[11px] text-slate-400">{l}</div><div className={`font-bold ${v == null ? 'text-slate-300' : v >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct(v)}</div></div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="p-5 border-b border-slate-100">
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <div className="text-xs font-bold text-slate-500 uppercase">Fiyat Grafiği</div>
+                    <div className="flex gap-1">
+                      {[['1a', '1A'], ['3a', '3A'], ['6a', '6A'], ['1y', '1Y'], ['3y', '3Y'], ['5y', '5Y']].map(([k, l]) => (
+                        <button key={k} onClick={() => setDetailPeriod(k)} className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors ${detailPeriod === k ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{l}</button>
+                      ))}
+                    </div>
+                  </div>
+                  {detailLoading ? <div className="p-10 text-center text-slate-400">Fiyat geçmişi çekiliyor…</div>
+                    : detailErr ? <div className="p-6 text-center text-rose-500 text-sm">{detailErr}</div>
+                    : detailChartData.length > 1 ? <PriceChart data={detailChartData} />
+                    : <div className="p-10 text-center text-slate-400">Bu dönem için yeterli veri yok.</div>}
+                </div>
+
+                <div className="p-5">
+                  <div className="text-xs font-bold text-slate-500 uppercase mb-3">Risk Metrikleri {detailRisk && <span className="text-slate-400 normal-case font-normal">· {detailRisk.n} günlük veri · Rf %{rfRate}</span>}</div>
+                  {!detailRisk ? <div className="text-sm text-slate-400">Risk metrikleri için yeterli günlük veri yok (en az ~20 gün). "Fiyat geçmişi çekiliyor" ise bekleyin.</div>
+                    : <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                        {[['Yıllık Getiri', detailRisk.RpAnnual != null ? fmtPct(detailRisk.RpAnnual) : '—'], ['Yıllık Volatilite', fmtPct(detailRisk.annVol)], ['Max Drawdown', fmtPct(detailRisk.maxDD)], ['Sharpe', detailRisk.sharpe != null ? detailRisk.sharpe.toFixed(2) : '—'], ['Sortino', detailRisk.sortino != null ? detailRisk.sortino.toFixed(2) : '—']].map(([l, v]) => (
+                          <div key={l} className="bg-slate-50 rounded-xl p-3"><div className="text-[11px] text-slate-400">{l}</div><div className="font-bold text-slate-800 text-lg">{v}</div></div>
+                        ))}
+                      </div>}
+                  <div className="mt-3 text-[10px] text-slate-400">Sharpe/Sortino, girdiğiniz risksiz getiri (Rf) oranına göre hesaplanır (Risk &amp; Performans sekmesinden değiştirilebilir). Yatırım tavsiyesi değildir.</div>
+                </div>
+              </div>
+            )}
+            {!detailFund && (<>
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6">
               <div className="flex items-center gap-2 mb-4"><BarChart3 size={20} className="text-indigo-500" /><h2 className="text-lg font-bold text-slate-800">Fon Tarayıcı / Karşılaştırma</h2></div>
               <div className="flex flex-col lg:flex-row lg:items-end gap-3">
@@ -1140,9 +1248,9 @@ function App() {
                         const isFav = favSet.has(f.kod);
                         const cell = (v) => <td className={`p-3 text-right font-bold ${v == null ? 'text-slate-300' : v >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct(v)}</td>;
                         return (
-                          <tr key={f.kod} className={owned ? 'bg-indigo-50/60 hover:bg-indigo-50' : 'hover:bg-slate-50'}>
+                          <tr key={f.kod} onClick={() => openDetail(f)} className={`cursor-pointer ${owned ? 'bg-indigo-50/60 hover:bg-indigo-50' : 'hover:bg-slate-50'}`}>
                             <td className="p-3 text-center">
-                              <button onClick={() => toggleFav(f.kod, f.ad)} title={isFav ? 'Favoriden çıkar' : 'Favorilere ekle'} className={`text-lg leading-none transition-colors ${isFav ? 'text-amber-500' : 'text-slate-300 hover:text-amber-400'}`}>★</button>
+                              <button onClick={(e) => { e.stopPropagation(); toggleFav(f.kod, f.ad); }} title={isFav ? 'Favoriden çıkar' : 'Favorilere ekle'} className={`text-lg leading-none transition-colors ${isFav ? 'text-amber-500' : 'text-slate-300 hover:text-amber-400'}`}>★</button>
                             </td>
                             <td className="p-3 font-extrabold text-indigo-700 whitespace-nowrap">{owned && <span className="text-amber-500 mr-1" title="Portföyünüzde tanımlı">●</span>}{f.kod}</td>
                             <td className="p-3 text-slate-700 max-w-[260px] truncate" title={f.ad}>{f.ad}</td>
@@ -1160,6 +1268,7 @@ function App() {
                 Getiriler doğrudan TEFAS'tan gelir (yüzde). Sütun başlığına tıklayarak sıralayın — en kârlıyı görmek için ilgili dönemi azalan sıralayın. ★ ile işaretli fonlar sizin portföyünüzde tanımlı olanlardır.
               </div>
             </div>
+            </>)}
             </div>
             )}
 
