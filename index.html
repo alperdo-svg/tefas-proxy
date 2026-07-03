@@ -192,17 +192,19 @@ function PriceChart({ data }) {
   );
 }
 
-const SEED_FUNDS = [{ code: 'GAL', name: 'GARANTİ PORTFÖY İKİNCİ PARA PİYASASI (TL) FONU' }];
+  const SEED_FUNDS = [{ code: 'GAL', name: 'GARANTİ PORTFÖY İKİNCİ PARA PİYASASI (TL) FONU' }];
 
 function App() {
   const [activeTab, setActiveTab] = useState('portfolio');
   const [transactions, setTransactions] = useState(() => load('transactions', []));
   const [definedFunds, setDefinedFunds] = useState(() => load('definedFunds', SEED_FUNDS));
   const [priceHistory, setPriceHistory] = useState(() => load('priceHistory', {}));
+  const [favorites, setFavorites] = useState(() => load('favorites', [])); // favori fon kodları
 
   useEffect(() => save('transactions', transactions), [transactions]);
   useEffect(() => save('definedFunds', definedFunds), [definedFunds]);
   useEffect(() => save('priceHistory', priceHistory), [priceHistory]);
+  useEffect(() => save('favorites', favorites), [favorites]);
 
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
@@ -243,6 +245,7 @@ function App() {
   const [scrSearch, setScrSearch] = useState('');
   const [scrSort, setScrSort] = useState({ key: 'g1y', dir: 'desc' });
   const [reportSub, setReportSub] = useState('getiri'); // getiri | analiz
+  const [scrFavOnly, setScrFavOnly] = useState(false); // Yatırım Fonları: sadece favoriler
   const [anType, setAnType] = useState('Para Piyasası'); // Fon Analiz: karşılaştırma türü
   const [derinInfo, setDerinInfo] = useState(false); // Risk & Performans: metrik açıklama kutusu açık mı
   const [derinExpanded, setDerinExpanded] = useState(null); // yorumu açık olan fon kodu
@@ -451,6 +454,13 @@ function App() {
     showConfirm('İşlemi Sil', 'Bu işlemi silmek istediğinize emin misiniz? (Fiyat geçmişi etkilenmez.)', () => { setTransactions((prev) => prev.filter((t) => t.id !== id)); setModalConfig({ isOpen: false }); });
   };
 
+  const favSet = useMemo(() => new Set(favorites), [favorites]);
+  // A kararı: favori işaretlemek fonu aynı zamanda "tanımlı fon" yapar → alış formu bozulmadan çalışır
+  const toggleFav = (kod, ad) => {
+    setFavorites((prev) => prev.includes(kod) ? prev.filter((c) => c !== kod) : [...prev, kod]);
+    setDefinedFunds((prev) => prev.find((f) => f.code === kod) ? prev : [...prev, { code: kod, name: ad || kod }]);
+  };
+
   const fmtCur = (v) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(v);
   const fmtPrice = (v) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY', minimumFractionDigits: 6, maximumFractionDigits: 6 }).format(v);
   const fmtQty = (v) => new Intl.NumberFormat('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 6 }).format(v);
@@ -526,6 +536,7 @@ function App() {
   const scrFiltered = useMemo(() => {
     const tr = (x) => (x || '').toLocaleLowerCase('tr');
     let list = scrFunds;
+    if (scrFavOnly) list = list.filter((f) => favSet.has(f.kod));
     if (scrType !== 'Tümü') list = list.filter((f) => tr(f.tur).includes(tr(scrType)));
     if (scrStatus === 'trading') list = list.filter((f) => f.tefas);
     else if (scrStatus === 'nontrading') list = list.filter((f) => !f.tefas);
@@ -541,7 +552,7 @@ function App() {
       if (vb == null) return -1;
       return dir === 'asc' ? va - vb : vb - va;
     });
-  }, [scrFunds, scrType, scrStatus, scrSearch, scrSort]);
+  }, [scrFunds, scrType, scrStatus, scrSearch, scrSort, scrFavOnly, favSet]);
 
   const scrSortBy = (key) => setScrSort((s) => (s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }));
 
@@ -1062,7 +1073,7 @@ function App() {
         {activeTab === 'report' && (
           <div>
             <div className="inline-flex bg-slate-100 rounded-xl p-1 mb-6 gap-1">
-              <button onClick={() => setReportSub('getiri')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'getiri' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Fon Getiri</button>
+              <button onClick={() => setReportSub('getiri')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'getiri' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Yatırım Fonları</button>
               <button onClick={() => setReportSub('analiz')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'analiz' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Fon Analiz</button>
               <button onClick={() => setReportSub('derin')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'derin' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Risk &amp; Performans</button>
             </div>
@@ -1093,6 +1104,7 @@ function App() {
                   <input type="text" value={scrSearch} onChange={(e) => setScrSearch(e.target.value)} placeholder="örn. GAL veya para piyasası" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-2.5 outline-none font-medium text-sm" />
                 </div>
                 <div className="flex gap-2">
+                  <button onClick={() => setScrFavOnly((v) => !v)} title="Sadece favori fonlar" className={`font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap border ${scrFavOnly ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-slate-200 text-slate-600 hover:text-amber-600'}`}><span className="text-lg leading-none">★</span> Favoriler{favorites.length > 0 ? ` (${favorites.length})` : ''}</button>
                   <button onClick={fetchScreener} disabled={scrLoading} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap"><RefreshCw size={16} className={scrLoading ? 'animate-spin' : ''} /> {scrLoading ? 'Geliyor…' : 'Yenile'}</button>
                   <button onClick={exportScreener} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap"><Download size={16} /> Excel</button>
                 </div>
@@ -1114,6 +1126,7 @@ function App() {
                   <table className="w-full text-left border-collapse text-xs min-w-[920px]">
                     <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider border-b border-slate-200">
                       <tr>
+                        <th className="p-3 text-center w-8"></th>
                         {[['kod', 'Fon Kodu', 'left'], ['ad', 'Fon Adı', 'left'], ['tur', 'Şemsiye', 'left'], ['risk', 'Risk', 'center'], ['g1a', '1 Ay', 'right'], ['g3a', '3 Ay', 'right'], ['g6a', '6 Ay', 'right'], ['gyb', 'Yılbaşı', 'right'], ['g1y', '1 Yıl', 'right'], ['g3y', '3 Yıl', 'right'], ['g5y', '5 Yıl', 'right']].map(([key, label, align]) => (
                           <th key={key} onClick={() => scrSortBy(key)} className={`p-3 cursor-pointer select-none hover:text-indigo-600 text-${align} whitespace-nowrap`}>
                             {label}{scrSort.key === key ? (scrSort.dir === 'desc' ? ' ▼' : ' ▲') : ''}
@@ -1124,10 +1137,14 @@ function App() {
                     <tbody className="divide-y divide-slate-100">
                       {scrShown.map((f) => {
                         const owned = ownedCodes.has(f.kod);
+                        const isFav = favSet.has(f.kod);
                         const cell = (v) => <td className={`p-3 text-right font-bold ${v == null ? 'text-slate-300' : v >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtPct(v)}</td>;
                         return (
                           <tr key={f.kod} className={owned ? 'bg-indigo-50/60 hover:bg-indigo-50' : 'hover:bg-slate-50'}>
-                            <td className="p-3 font-extrabold text-indigo-700 whitespace-nowrap">{owned && <span className="text-amber-500 mr-1">★</span>}{f.kod}</td>
+                            <td className="p-3 text-center">
+                              <button onClick={() => toggleFav(f.kod, f.ad)} title={isFav ? 'Favoriden çıkar' : 'Favorilere ekle'} className={`text-lg leading-none transition-colors ${isFav ? 'text-amber-500' : 'text-slate-300 hover:text-amber-400'}`}>★</button>
+                            </td>
+                            <td className="p-3 font-extrabold text-indigo-700 whitespace-nowrap">{owned && <span className="text-amber-500 mr-1" title="Portföyünüzde tanımlı">●</span>}{f.kod}</td>
                             <td className="p-3 text-slate-700 max-w-[260px] truncate" title={f.ad}>{f.ad}</td>
                             <td className="p-3 text-slate-500 max-w-[160px] truncate" title={f.tur}>{f.tur}{!f.tefas && <span className="ml-1 text-[10px] text-slate-400">(işlem görmüyor)</span>}</td>
                             <td className="p-3 text-center text-slate-600 font-bold">{f.risk || '-'}</td>
