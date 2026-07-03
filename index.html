@@ -482,6 +482,8 @@ function App() {
     setDetailLoading(false);
   };
   const closeDetail = () => { setDetailFund(null); setDetailHist(null); setDetailErr(''); };
+  const navCls = (active) => `flex items-center gap-3 px-4 py-2.5 text-sm cursor-pointer border-l-2 transition-colors ${active ? 'bg-[#EEF3F8] text-[#1E3A5F] font-semibold border-[#1E3A5F]' : 'text-slate-600 hover:bg-slate-50 border-transparent'}`;
+  const navSub = (active) => `block pl-11 pr-4 py-2 text-sm cursor-pointer border-l-2 transition-colors ${active ? 'bg-[#EEF3F8] text-[#1E3A5F] font-semibold border-[#1E3A5F]' : 'text-slate-500 hover:bg-slate-50 border-transparent'}`;
 
   const detailChartData = useMemo(() => {
     if (!detailHist || !detailHist.length) return [];
@@ -812,22 +814,41 @@ function App() {
 
 
   return (
-    <div className="min-h-screen bg-[#f3f4f6] text-slate-800 pb-12">
-      <header className="bg-[#1e1b4b] text-white border-b border-indigo-900 shadow-md sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 h-20 flex items-center justify-between">
-          <div className="flex flex-col">
-            <div className="flex items-center gap-2"><PieChart size={28} className="text-indigo-400" /><h1 className="text-2xl font-bold tracking-wide">Fon Getiri Paneli</h1></div>
-            <p className="text-xs text-indigo-200 mt-1 opacity-80">Yatırım Fonu Getiri ve Takip Sistemi</p>
-          </div>
-          <nav className="flex gap-2">
-            {[['portfolio', 'Portföyüm', Wallet], ['report', 'Fon Raporu', BarChart3], ['add', 'Yeni Fon Ekle', PlusCircle], ['history', 'Geçmiş Defteri', History]].map(([id, label, Ico]) => (
-              <button key={id} onClick={() => setActiveTab(id)} className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTab === id ? 'bg-indigo-600 text-white shadow-lg' : 'bg-indigo-950 text-indigo-200 hover:bg-indigo-900'}`}><Ico size={18} /> {label}</button>
-            ))}
-          </nav>
+    <div className="min-h-screen flex bg-[#F4F6F9] text-slate-800">
+      <aside className="w-56 flex-shrink-0 bg-white border-r border-slate-200 sticky top-0 h-screen overflow-y-auto">
+        <div className="px-4 py-4 border-b border-slate-100 flex items-center gap-2">
+          <span className="bg-[#1E3A5F] text-white w-8 h-8 rounded-lg flex items-center justify-center"><PieChart size={18} /></span>
+          <div><div className="font-bold text-[#1E3A5F] leading-tight">Fon Paneli</div><div className="text-[10px] text-slate-400">Getiri ve Takip</div></div>
         </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 py-8">
+        <div className="text-[10px] font-bold tracking-wider text-slate-400 px-4 pt-4 pb-1">ANA MENÜ</div>
+        <nav className="pb-6">
+          <div onClick={() => { setActiveTab('dashboard'); closeDetail(); }} className={navCls(activeTab === 'dashboard')}><PieChart size={17} /> Günün Özeti</div>
+          <div onClick={() => { setActiveTab('portfolio'); closeDetail(); }} className={navCls(activeTab === 'portfolio')}><Wallet size={17} /> Portföyüm</div>
+          <div onClick={() => { setActiveTab('report'); setReportSub('getiri'); setScrFavOnly(true); closeDetail(); }} className={navCls(activeTab === 'report' && reportSub === 'getiri' && scrFavOnly)}><span className="text-amber-500 text-base leading-none">★</span> Favori Fonlar {favorites.length > 0 && <span className="ml-auto text-[11px] bg-[#EEF3F8] text-[#1E3A5F] px-2 rounded-full">{favorites.length}</span>}</div>
+          <div onClick={() => { setActiveTab('history'); closeDetail(); }} className={navCls(activeTab === 'history')}><History size={17} /> Geçmiş Defteri</div>
+          <div className="flex items-center gap-3 px-4 py-2.5 text-sm text-[#1E3A5F] font-semibold mt-1"><TrendingUp size={17} /> Fonlar</div>
+          <div onClick={() => { setActiveTab('report'); setReportSub('getiri'); setScrFavOnly(false); closeDetail(); }} className={navSub(activeTab === 'report' && reportSub === 'getiri' && !scrFavOnly)}>Yatırım Fonları</div>
+          <div onClick={() => { setActiveTab('report'); setReportSub('analiz'); closeDetail(); }} className={navSub(activeTab === 'report' && reportSub === 'analiz')}>Fon Analiz</div>
+          <div onClick={() => { setActiveTab('report'); setReportSub('derin'); closeDetail(); }} className={navSub(activeTab === 'report' && reportSub === 'derin')}>Risk &amp; Performans</div>
+          <div onClick={() => { setActiveTab('endeks'); closeDetail(); }} className={`${navCls(activeTab === 'endeks')} mt-1`}><BarChart3 size={17} /> Endeksler</div>
+        </nav>
+      </aside>
+      <div className="flex-1 min-w-0">
+      <main className="max-w-7xl mx-auto px-6 py-8">
+        {activeTab === 'dashboard' && (
+          <div>
+            <h1 className="text-2xl font-bold text-slate-800 mb-1">Günün Özeti</h1>
+            <p className="text-sm text-slate-500 mb-6">Portföyünüzün anlık durumu ve öne çıkanlar.</p>
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10 text-center text-slate-400">Bu ekran yakında: toplam değer, kâr/zarar, günlük değişim ve son işlemler burada özetlenecek.</div>
+          </div>
+        )}
+        {activeTab === 'endeks' && (
+          <div>
+            <h1 className="text-2xl font-bold text-slate-800 mb-1">Endeksler</h1>
+            <p className="text-sm text-slate-500 mb-6">BIST 100 ve diğer endeksler — fonların Beta/Alpha hesabı için.</p>
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10 text-center text-slate-400">Bu ekran yakında: endeks verileri çekilecek ve hisse/karma fonların Beta, Alpha, Bilgi Oranı hesaplanacak.</div>
+          </div>
+        )}
         {activeTab === 'portfolio' && (
           <div className="flex flex-col lg:flex-row gap-6">
             <div className="w-full lg:w-1/3">
@@ -1126,11 +1147,7 @@ function App() {
 
         {activeTab === 'report' && (
           <div>
-            <div className="inline-flex bg-slate-100 rounded-xl p-1 mb-6 gap-1">
-              <button onClick={() => setReportSub('getiri')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'getiri' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Yatırım Fonları</button>
-              <button onClick={() => setReportSub('analiz')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'analiz' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Fon Analiz</button>
-              <button onClick={() => setReportSub('derin')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${reportSub === 'derin' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Risk &amp; Performans</button>
-            </div>
+            <h1 className="text-2xl font-bold text-slate-800 mb-6">{reportSub === 'getiri' ? (scrFavOnly ? 'Favori Fonlar' : 'Yatırım Fonları') : reportSub === 'analiz' ? 'Fon Analiz' : 'Risk & Performans'}</h1>
 
             {reportSub === 'getiri' && (
             <div>
@@ -1544,6 +1561,7 @@ function App() {
           </div>
         )}
       </main>
+      </div>
     </div>
   );
 }
