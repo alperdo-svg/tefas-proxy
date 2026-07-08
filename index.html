@@ -274,6 +274,7 @@ function App() {
   const [scrFavOnly, setScrFavOnly] = useState(false); // Yatırım Fonları: sadece favoriler
   const [detailFund, setDetailFund] = useState(null); // açık fon detayı
   const [detay, setDetay] = useState(null); // fondetay: künye + varlık dağılımı
+  const [detayLoading, setDetayLoading] = useState(false); // künye/dağılım çekiliyor mu
   const [detailHist, setDetailHist] = useState(null); // detay fiyat geçmişi [{date,value}]
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailErr, setDetailErr] = useState('');
@@ -496,8 +497,8 @@ function App() {
   // FON DETAY (Aşama 1) — tıklanan fonun günlük fiyat geçmişini çek
   const openDetail = async (f) => {
     setDetailFund(f); setDetailErr(''); setDetailPeriod('1y');
-    setDetay(null);
-    fetch(`/api/fondetay?kod=${encodeURIComponent(f.kod)}`).then((r) => r.json()).then((j) => setDetay(j && j.ok ? j : null)).catch(() => setDetay(null));
+    setDetay(null); setDetayLoading(true);
+    fetch(`/api/fondetay?kod=${encodeURIComponent(f.kod)}`).then((r) => r.json()).then((j) => setDetay(j && j.ok ? j : null)).catch(() => setDetay(null)).finally(() => setDetayLoading(false));
     if (priceHistory[f.kod] && priceHistory[f.kod].length > 1) { setDetailHist(priceHistory[f.kod]); return; }
     setDetailHist(null); setDetailLoading(true);
     try {
@@ -510,7 +511,7 @@ function App() {
     } catch (e) { setDetailErr('Veri çekilemedi (TEFAS dakikada ~6 istek sınırı koyar; birkaç saniye sonra tekrar deneyin).'); setDetailHist([]); }
     setDetailLoading(false);
   };
-  const closeDetail = () => { setDetailFund(null); setDetailHist(null); setDetailErr(''); setDetay(null); };
+  const closeDetail = () => { setDetailFund(null); setDetailHist(null); setDetailErr(''); setDetay(null); setDetayLoading(false); };
   const navCls = (active) => `flex items-center gap-3 px-4 py-2.5 text-sm cursor-pointer border-l-2 transition-colors ${active ? 'bg-[#EEF3F8] text-[#1E3A5F] font-semibold border-[#1E3A5F]' : 'text-slate-600 hover:bg-slate-50 border-transparent'}`;
   const navSub = (active) => `block pl-11 pr-4 py-2 text-sm cursor-pointer border-l-2 transition-colors ${active ? 'bg-[#EEF3F8] text-[#1E3A5F] font-semibold border-[#1E3A5F]' : 'text-slate-500 hover:bg-slate-50 border-transparent'}`;
 
@@ -1198,6 +1199,13 @@ function App() {
                   </div>
                   <button onClick={() => { setDefinedFunds((prev) => prev.find((f) => f.code === detailFund.kod) ? prev : [...prev, { code: detailFund.kod, name: detailFund.ad }]); setActiveTab('portfolio'); }} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-xl shadow-sm text-sm whitespace-nowrap">Portföye Al</button>
                 </div>
+
+                {detayLoading && !detay && (
+                  <div className="p-5 border-b border-slate-100 text-sm text-slate-400 flex items-center gap-2"><RefreshCw size={14} className="animate-spin" /> Künye ve varlık dağılımı yükleniyor…</div>
+                )}
+                {!detayLoading && !detay && (
+                  <div className="p-5 border-b border-slate-100 text-sm text-slate-400">Bu fon için künye / varlık dağılımı alınamadı. (TEFAS dakikada ~6 istek sınırı koyabilir; birkaç saniye sonra "← Geri" deyip tekrar tıklayın.)</div>
+                )}
 
                 {detay && (
                   <div className="p-5 border-b border-slate-100">
