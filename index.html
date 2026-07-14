@@ -272,9 +272,23 @@ function App() {
   const [scrSort, setScrSort] = useState({ key: 'g1y', dir: 'desc' });
   const [reportSub, setReportSub] = useState('getiri'); // getiri | analiz
   const [scrFavOnly, setScrFavOnly] = useState(false); // Yatırım Fonları: sadece favoriler
+  // ===== Gelişmiş Filtreler (FiltreX) + toplu özet veri =====
+  const [ozetMap, setOzetMap] = useState({});     // kod -> { buyukluk, yatirimci, pay }
+  const [ozetLoading, setOzetLoading] = useState(false);
+  const [ozetTarih, setOzetTarih] = useState(null);
+  const [showFx, setShowFx] = useState(false);    // gelişmiş filtre paneli açık mı
+  const [fxTab, setFxTab] = useState('genel');    // genel | getiri | risk
+  const [fxKurucu, setFxKurucu] = useState('');   // '' = Tümü
+  const [fxRisk, setFxRisk] = useState([]);       // seçili risk seviyeleri ['1'..'7']
+  const [fxYat, setFxYat] = useState({ min: '', max: '' }); // yatırımcı sayısı aralığı
+  const [fxBuy, setFxBuy] = useState({ min: '', max: '' }); // fon büyüklüğü (milyon ₺) aralığı
+  const [fxPay, setFxPay] = useState({ min: '', max: '' }); // pazar payı % aralığı
+  const [fxRet, setFxRet] = useState({ g1a: { min: '', max: '' }, g3a: { min: '', max: '' }, g6a: { min: '', max: '' }, gyb: { min: '', max: '' }, g1y: { min: '', max: '' }, g3y: { min: '', max: '' }, g5y: { min: '', max: '' } });
   const [detailFund, setDetailFund] = useState(null); // açık fon detayı
   const [detay, setDetay] = useState(null); // fondetay: künye + varlık dağılımı
   const [detayLoading, setDetayLoading] = useState(false); // künye/dağılım çekiliyor mu
+  const detayCache = useRef({}); // kod -> detay (aynı fona tekrar tıklamada anında)
+  const importRef = useRef(null); // yedek geri yükleme dosya girişi
   const [detailHist, setDetailHist] = useState(null); // detay fiyat geçmişi [{date,value}]
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailErr, setDetailErr] = useState('');
@@ -291,6 +305,46 @@ function App() {
 
   const showAlert = (title, message) => setModalConfig({ isOpen: true, title, message, onConfirm: null, isAlert: true });
   const showConfirm = (title, message, onConfirm) => setModalConfig({ isOpen: true, title, message, onConfirm, isAlert: false });
+
+  // ===== Veri Yedekleme (tüm kayıtları JSON dosyasına indir / geri yükle) =====
+  const exportBackup = () => {
+    const data = {
+      _app: 'FonGetiriPaneli', _version: 1, _exportedAt: new Date().toISOString(),
+      transactions, definedFunds, priceHistory, favorites,
+    };
+    try {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `fon-paneli-yedek-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (e) { showAlert('Hata', 'Yedek oluşturulamadı.'); }
+  };
+
+  const applyBackup = (d) => {
+    setTransactions(Array.isArray(d.transactions) ? d.transactions : []);
+    setDefinedFunds(Array.isArray(d.definedFunds) && d.definedFunds.length ? d.definedFunds : SEED_FUNDS);
+    setPriceHistory(d.priceHistory && typeof d.priceHistory === 'object' ? d.priceHistory : {});
+    setFavorites(Array.isArray(d.favorites) ? d.favorites : []);
+    showAlert('Geri Yüklendi', 'Yedek başarıyla yüklendi. Tüm kayıtların geri geldi.');
+  };
+
+  const importBackup = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      let d;
+      try { d = JSON.parse(reader.result); } catch { showAlert('Hata', 'Dosya okunamadı — geçerli bir yedek (JSON) değil.'); return; }
+      if (!d || typeof d !== 'object' || (!Array.isArray(d.transactions) && !d.priceHistory && !Array.isArray(d.definedFunds))) {
+        showAlert('Hata', 'Bu dosya bu uygulamanın yedeği gibi görünmüyor.'); return;
+      }
+      const tarih = d._exportedAt ? new Date(d._exportedAt).toLocaleString('tr-TR') : 'bilinmiyor';
+      const nTx = Array.isArray(d.transactions) ? d.transactions.length : 0;
+      const nFon = Array.isArray(d.definedFunds) ? d.definedFunds.length : 0;
+      showConfirm('Yedeği Geri Yükle', `Yedek tarihi: ${tarih}\n${nTx} işlem · ${nFon} tanımlı fon.\n\nMevcut kayıtların bu yedekle DEĞİŞTİRİLECEK. Devam edilsin mi?`, () => { applyBackup(d); setModalConfig({ isOpen: false }); });
+    };
+    reader.readAsText(file);
+  };
 
   const calculatedQty = useMemo(() => {
     const p = parseTRNumber(txPrice), t = parseTRNumber(txTotalAmount);
@@ -497,8 +551,12 @@ function App() {
   // FON DETAY (Aşama 1) — tıklanan fonun günlük fiyat geçmişini çek
   const openDetail = async (f) => {
     setDetailFund(f); setDetailErr(''); setDetailPeriod('1y');
-    setDetay(null); setDetayLoading(true);
-    fetch(`/api/fondetay?kod=${encodeURIComponent(f.kod)}`).then((r) => r.json()).then((j) => setDetay(j && j.ok ? j : null)).catch(() => setDetay(null)).finally(() => setDetayLoading(false));
+    const cached = detayCache.current[f.kod];
+    if (cached) { setDetay(cached); setDetayLoading(false); }
+    else {
+      setDetay(null); setDetayLoading(true);
+      fetch(`/api/fondetay?kod=${encodeURIComponent(f.kod)}`).then((r) => r.json()).then((j) => { const val = j && j.ok ? j : null; if (val) detayCache.current[f.kod] = val; setDetay(val); }).catch(() => setDetay(null)).finally(() => setDetayLoading(false));
+    }
     if (priceHistory[f.kod] && priceHistory[f.kod].length > 1) { setDetailHist(priceHistory[f.kod]); return; }
     setDetailHist(null); setDetailLoading(true);
     try {
@@ -609,6 +667,24 @@ function App() {
     if (activeTab === 'report' && scrFunds.length === 0 && !scrLoading && !scrError) fetchScreener();
   }, [activeTab]);
 
+  // Gelişmiş filtreler için toplu özet (büyüklük + yatırımcı sayısı) — arka planda tek çağrı
+  useEffect(() => {
+    if (activeTab !== 'report') return;
+    if (Object.keys(ozetMap).length || ozetLoading) return;
+    setOzetLoading(true);
+    fetch('/api/fonozet')
+      .then((r) => r.json())
+      .then((j) => {
+        if (j && j.ok && Array.isArray(j.funds)) {
+          const m = {};
+          j.funds.forEach((x) => { m[x.kod] = x; });
+          setOzetMap(m); setOzetTarih(j.tarih || null);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setOzetLoading(false));
+  }, [activeTab]);
+
   const ownedCodes = useMemo(() => {
     const s = new Set();
     definedFunds.forEach((f) => s.add(f.code));
@@ -621,6 +697,64 @@ function App() {
     return Array.from(s).sort((a, b) => a.localeCompare(b, 'tr'));
   }, [scrFunds]);
 
+  // Kurucu: fon adından türet ("GARANTİ PORTFÖY İKİNCİ ..." -> "GARANTİ PORTFÖY")
+  const kurucuOf = (ad) => {
+    if (!ad) return '';
+    const s = String(ad);
+    const up = s.toLocaleUpperCase('tr');
+    const i = up.indexOf('PORTFÖY');
+    if (i >= 0) return s.slice(0, i + 7).trim();
+    return s.split(/\s+/).slice(0, 2).join(' ');
+  };
+  const kurucuList = useMemo(() => {
+    const s = new Set(scrFunds.map((f) => kurucuOf(f.ad)).filter(Boolean));
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'tr'));
+  }, [scrFunds]);
+
+  // Pazar payı için: kategori (şemsiye) bazında toplam büyüklük
+  const kategoriTotals = useMemo(() => {
+    const t = {};
+    scrFunds.forEach((f) => {
+      const o = ozetMap[f.kod];
+      if (o && o.buyukluk != null) t[f.tur] = (t[f.tur] || 0) + o.buyukluk;
+    });
+    return t;
+  }, [scrFunds, ozetMap]);
+
+  const payOf = (f) => {
+    const o = ozetMap[f.kod];
+    const tot = kategoriTotals[f.tur];
+    return (o && o.buyukluk != null && tot) ? (o.buyukluk / tot) * 100 : null;
+  };
+
+  // Aktif gelişmiş filtre sayısı (rozet için)
+  const fxCount = useMemo(() => {
+    let n = 0;
+    if (fxKurucu) n++;
+    if (fxRisk.length) n++;
+    [fxYat, fxBuy, fxPay].forEach((o) => { if (o.min || o.max) n++; });
+    Object.values(fxRet).forEach((o) => { if (o.min || o.max) n++; });
+    return n;
+  }, [fxKurucu, fxRisk, fxYat, fxBuy, fxPay, fxRet]);
+
+  const fxReset = () => {
+    setFxKurucu(''); setFxRisk([]);
+    setFxYat({ min: '', max: '' }); setFxBuy({ min: '', max: '' }); setFxPay({ min: '', max: '' });
+    setFxRet({ g1a: { min: '', max: '' }, g3a: { min: '', max: '' }, g6a: { min: '', max: '' }, gyb: { min: '', max: '' }, g1y: { min: '', max: '' }, g3y: { min: '', max: '' }, g5y: { min: '', max: '' } });
+  };
+  const setRet = (k, o) => setFxRet((prev) => ({ ...prev, [k]: o }));
+  // Aralık girişi (En az – En çok) — obj: {min,max}, setObj: (yeni)=>void
+  const aralik = (label, hint, obj, setObj) => (
+    <div>
+      <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">{label}{hint ? <span className="ml-1 text-[10px] text-slate-400 normal-case font-normal">{hint}</span> : ''}</label>
+      <div className="flex items-center gap-2">
+        <input value={obj.min} onChange={(e) => setObj({ ...obj, min: e.target.value })} inputMode="decimal" placeholder="En az" className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-300" />
+        <span className="text-slate-300 shrink-0">–</span>
+        <input value={obj.max} onChange={(e) => setObj({ ...obj, max: e.target.value })} inputMode="decimal" placeholder="En çok" className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-300" />
+      </div>
+    </div>
+  );
+
   const scrFiltered = useMemo(() => {
     const tr = (x) => (x || '').toLocaleLowerCase('tr');
     let list = scrFunds;
@@ -630,6 +764,24 @@ function App() {
     else if (scrStatus === 'nontrading') list = list.filter((f) => !f.tefas);
     const q = tr(scrSearch).trim();
     if (q) list = list.filter((f) => tr(f.kod).includes(q) || tr(f.ad).includes(q));
+
+    // --- Gelişmiş filtreler ---
+    const rng = (v, mn, mx) => {
+      const a = parseTRNumber(mn), b = parseTRNumber(mx);
+      if (!isNaN(a) && (v == null || v < a)) return false;
+      if (!isNaN(b) && (v == null || v > b)) return false;
+      return true;
+    };
+    if (fxKurucu) list = list.filter((f) => kurucuOf(f.ad) === fxKurucu);
+    if (fxRisk.length) list = list.filter((f) => fxRisk.includes(String(f.risk)));
+    if (fxYat.min || fxYat.max) list = list.filter((f) => rng(ozetMap[f.kod] ? ozetMap[f.kod].yatirimci : null, fxYat.min, fxYat.max));
+    if (fxBuy.min || fxBuy.max) list = list.filter((f) => { const b = ozetMap[f.kod] ? ozetMap[f.kod].buyukluk : null; return rng(b == null ? null : b / 1e6, fxBuy.min, fxBuy.max); });
+    if (fxPay.min || fxPay.max) list = list.filter((f) => rng(payOf(f), fxPay.min, fxPay.max));
+    ['g1a', 'g3a', 'g6a', 'gyb', 'g1y', 'g3y', 'g5y'].forEach((k) => {
+      const r = fxRet[k];
+      if (r && (r.min || r.max)) list = list.filter((f) => rng(f[k], r.min, r.max));
+    });
+
     const { key, dir } = scrSort;
     const isText = key === 'kod' || key === 'ad' || key === 'tur';
     return [...list].sort((a, b) => {
@@ -640,7 +792,7 @@ function App() {
       if (vb == null) return -1;
       return dir === 'asc' ? va - vb : vb - va;
     });
-  }, [scrFunds, scrType, scrStatus, scrSearch, scrSort, scrFavOnly, favSet]);
+  }, [scrFunds, scrType, scrStatus, scrSearch, scrSort, scrFavOnly, favSet, fxKurucu, fxRisk, fxYat, fxBuy, fxPay, fxRet, ozetMap, kategoriTotals]);
 
   const scrSortBy = (key) => setScrSort((s) => (s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }));
 
@@ -882,6 +1034,21 @@ function App() {
           </div>
         )}
         {activeTab === 'portfolio' && (
+          <>
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="bg-amber-50 text-amber-600 p-2 rounded-xl mt-0.5"><Database size={18} /></div>
+              <div>
+                <div className="font-bold text-slate-800 text-sm">Veri Yedekleme</div>
+                <div className="text-xs text-slate-500 max-w-xl">Tüm kayıtların yalnızca bu tarayıcıda saklanır — tarayıcı verisini/çerezleri temizlersen silinir. Düzenli yedek al; dosyayı telefon ↔ bilgisayar arasında taşımak için de kullanabilirsin.</div>
+              </div>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <button onClick={exportBackup} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-xl shadow-sm text-sm flex items-center gap-2 whitespace-nowrap"><Download size={16} /> Yedekle</button>
+              <button onClick={() => importRef.current && importRef.current.click()} className="bg-white border border-slate-200 hover:border-indigo-300 text-slate-700 font-bold py-2 px-4 rounded-xl text-sm flex items-center gap-2 whitespace-nowrap"><ArrowDownToLine size={16} /> Geri Yükle</button>
+              <input ref={importRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) importBackup(f); e.target.value = ''; }} />
+            </div>
+          </div>
           <div className="flex flex-col lg:flex-row gap-6">
             <div className="w-full lg:w-1/3">
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
@@ -992,6 +1159,7 @@ function App() {
               </div>
             </div>
           </div>
+          </>
         )}
 
         {(activeTab === 'portfolio' || activeTab === 'history') && (
@@ -1305,6 +1473,7 @@ function App() {
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => setScrFavOnly((v) => !v)} title="Sadece favori fonlar" className={`font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap border ${scrFavOnly ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-slate-200 text-slate-600 hover:text-amber-600'}`}><span className="text-lg leading-none">★</span> Favoriler{favorites.length > 0 ? ` (${favorites.length})` : ''}</button>
+                  <button onClick={() => setShowFx((v) => !v)} title="Gelişmiş filtreler" className={`font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap border ${showFx || fxCount > 0 ? 'bg-[#1E3A5F] border-[#1E3A5F] text-white' : 'bg-white border-slate-200 text-slate-600 hover:text-indigo-600'}`}><BarChart3 size={16} /> Filtrele{fxCount > 0 ? <span className="bg-white/25 text-white text-[11px] px-1.5 rounded-full">{fxCount}</span> : ''}</button>
                   <button onClick={fetchScreener} disabled={scrLoading} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap"><RefreshCw size={16} className={scrLoading ? 'animate-spin' : ''} /> {scrLoading ? 'Geliyor…' : 'Yenile'}</button>
                   <button onClick={exportScreener} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-2 whitespace-nowrap"><Download size={16} /> Excel</button>
                 </div>
@@ -1315,6 +1484,73 @@ function App() {
                   : `${scrFiltered.length} fon listeleniyor${scrFiltered.length > 600 ? ' (ilk 600 gösteriliyor)' : ''}. ★ = portföyünüzdeki fonlar.`}
               </div>
             </div>
+
+            {showFx && (
+              <div className="bg-white rounded-2xl shadow-sm border-2 border-indigo-200 overflow-hidden mb-6">
+                <div className="px-5 pt-4 border-b border-slate-100">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2"><BarChart3 size={18} className="text-indigo-600" /><h3 className="font-bold text-slate-800">Gelişmiş Filtreler</h3>{fxCount > 0 && <span className="bg-indigo-100 text-indigo-700 text-[11px] font-bold px-2 py-0.5 rounded-full">{fxCount} aktif</span>}</div>
+                    <button onClick={() => setShowFx(false)} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">×</button>
+                  </div>
+                  <div className="flex gap-1">
+                    {[['genel', 'Genel'], ['getiri', 'Getiri'], ['risk', 'Risk']].map(([k, l]) => (
+                      <button key={k} onClick={() => setFxTab(k)} className={`px-4 py-2 text-sm font-bold border-b-2 transition-colors ${fxTab === k ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>{l}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="p-5">
+                  {fxTab === 'genel' && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Kurucu</label>
+                        <select value={fxKurucu} onChange={(e) => setFxKurucu(e.target.value)} className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-300">
+                          <option value="">Tümü</option>
+                          {kurucuList.map((k) => <option key={k} value={k}>{k}</option>)}
+                        </select>
+                      </div>
+                      {aralik('Yatırımcı Sayısı', 'aralık', fxYat, setFxYat)}
+                      {aralik('Fon Büyüklüğü', 'mn ₺ · aralık', fxBuy, setFxBuy)}
+                      {aralik('Pazar Payı', '% · kategori içi', fxPay, setFxPay)}
+                      <div className="md:col-span-2 lg:col-span-3 text-[11px] text-slate-400 leading-relaxed">
+                        {ozetLoading ? 'Büyüklük / yatırımcı verisi yükleniyor…'
+                          : ozetTarih ? `Büyüklük & yatırımcı verisi (${ozetTarih}) tüm fonlar için arka planda çekildi. Pazar payı = fonun büyüklüğü ÷ aynı kategorideki fonların toplam büyüklüğü.`
+                          : 'Büyüklük / yatırımcı verisi henüz gelmedi; bu üç filtre veri gelince aktifleşir (birkaç saniye).'}
+                      </div>
+                    </div>
+                  )}
+                  {fxTab === 'getiri' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {aralik('1 Ay', '%', fxRet.g1a, (o) => setRet('g1a', o))}
+                      {aralik('3 Ay', '%', fxRet.g3a, (o) => setRet('g3a', o))}
+                      {aralik('6 Ay', '%', fxRet.g6a, (o) => setRet('g6a', o))}
+                      {aralik('Yılbaşı', '%', fxRet.gyb, (o) => setRet('gyb', o))}
+                      {aralik('1 Yıl', '%', fxRet.g1y, (o) => setRet('g1y', o))}
+                      {aralik('3 Yıl', '%', fxRet.g3y, (o) => setRet('g3y', o))}
+                      {aralik('5 Yıl', '%', fxRet.g5y, (o) => setRet('g5y', o))}
+                    </div>
+                  )}
+                  {fxTab === 'risk' && (
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-2 uppercase">Risk Seviyesi <span className="text-[10px] text-slate-400 normal-case font-normal">(birden çok seçilebilir · 1 en düşük, 7 en yüksek)</span></label>
+                      <div className="flex flex-wrap gap-2">
+                        {['1', '2', '3', '4', '5', '6', '7'].map((r) => (
+                          <button key={r} onClick={() => setFxRisk((prev) => prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r])} className={`w-11 h-11 rounded-xl font-bold text-sm border transition-colors ${fxRisk.includes(r) ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}>{r}</button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                  <span className="text-xs text-slate-500"><b className="text-slate-700">{scrFiltered.length}</b> fon eşleşti</span>
+                  <div className="flex gap-2">
+                    <button onClick={fxReset} className="text-slate-500 hover:bg-slate-100 font-bold py-2 px-4 rounded-lg text-sm flex items-center gap-1"><RefreshCw size={14} /> Sıfırla</button>
+                    <button onClick={() => setShowFx(false)} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-lg text-sm">Uygula</button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
               {scrLoading && scrFunds.length === 0 ? (
@@ -1627,7 +1863,7 @@ function App() {
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
             <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
               <h3 className="text-xl font-bold text-slate-800 mb-2">{modalConfig.title}</h3>
-              <p className="text-slate-600 mb-6">{modalConfig.message}</p>
+              <p className="text-slate-600 mb-6 whitespace-pre-line">{modalConfig.message}</p>
               <div className="flex justify-end gap-3">
                 {!modalConfig.isAlert && <button onClick={() => setModalConfig({ ...modalConfig, isOpen: false })} className="px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg font-medium">İptal</button>}
                 <button onClick={() => { if (modalConfig.onConfirm) modalConfig.onConfirm(); else setModalConfig({ ...modalConfig, isOpen: false }); }} className={`px-4 py-2 text-white rounded-lg font-medium ${modalConfig.isAlert ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}>{modalConfig.isAlert ? 'Tamam' : 'Onayla ve Sil'}</button>
