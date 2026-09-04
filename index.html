@@ -252,6 +252,8 @@ function App() {
   const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
   const [txPrice, setTxPrice] = useState('');
   const [txTotalAmount, setTxTotalAmount] = useState('');
+  const [priceAutoLoading, setPriceAutoLoading] = useState(false);
+  const [priceAutoNote, setPriceAutoNote] = useState(''); // '', 'ok:YYYY-MM-DD', 'near:YYYY-MM-DD', 'none'
   const [txQty, setTxQty] = useState(''); // satışta: satılacak adet (varsayılan = elindeki)
   const [priceUpdateFund, setPriceUpdateFund] = useState('');
   const [priceUpdateDate, setPriceUpdateDate] = useState(new Date().toISOString().split('T')[0]);
@@ -394,6 +396,51 @@ function App() {
       setTxQty(heldShares > 0 ? heldShares.toLocaleString('tr-TR', { useGrouping: false, maximumFractionDigits: 6 }) : '');
     }
   }, [txType, fundCode]);
+
+  // Fon + tarih seçilince fiyatı TEFAS'tan otomatik getir (fonlar tek günlük fiyatla işler → doğrusu da bu)
+  useEffect(() => {
+    if (!fundCode || !txDate) { setPriceAutoNote(''); return; }
+    let iptal = false;
+    const onOrBefore = (hist, target) => {
+      let r = null;
+      const s = [...hist].filter((h) => h.date && h.price > 0).sort((a, b) => a.date.localeCompare(b.date));
+      for (const h of s) { if (h.date <= target) r = h; else break; }
+      return r || (s.length ? s[0] : null);
+    };
+    const fill = async () => {
+      setPriceAutoLoading(true);
+      // 1) elde kayıtlı fiyat geçmişi varsa oradan
+      let hist = (priceHistory[fundCode] || []).map((h) => ({ date: h.date, price: h.value }));
+      let hit = hist.length ? onOrBefore(hist, txDate) : null;
+      // 2) yoksa ya da o tarihi kapsamıyorsa TEFAS'tan çek
+      if (!hit || hit.date > txDate) {
+        try {
+          const r = await fetchTefasFund(fundCode);
+          if (r && r.history && r.history.length) hit = onOrBefore(r.history, txDate);
+        } catch {}
+      }
+      if (iptal) return;
+      if (hit && hit.price > 0) {
+        setTxPrice(hit.price.toLocaleString('tr-TR', { minimumFractionDigits: 6, maximumFractionDigits: 6, useGrouping: false }));
+        setPriceAutoNote((hit.date === txDate ? 'ok:' : 'near:') + hit.date);
+      } else {
+        setPriceAutoNote('none');
+      }
+      setPriceAutoLoading(false);
+    };
+    fill();
+    return () => { iptal = true; };
+  }, [fundCode, txDate]);
+
+  // Otomatik fiyat durum göstergesi (fiyat alanının altında)
+  const priceAutoStatus = () => {
+    if (!fundCode) return null;
+    if (priceAutoLoading) return <div className="text-[11px] text-slate-400 flex items-center gap-1"><RefreshCw size={12} className="animate-spin" /> TEFAS'tan fiyat alınıyor…</div>;
+    if (priceAutoNote.startsWith('ok:')) return <div className="text-[11px] text-emerald-600">✓ {new Date(priceAutoNote.slice(3)).toLocaleDateString('tr-TR')} kapanış fiyatı otomatik geldi — düzenleyebilirsin.</div>;
+    if (priceAutoNote.startsWith('near:')) return <div className="text-[11px] text-amber-600">≈ Bu tarihe ait fiyat yok; en yakın {new Date(priceAutoNote.slice(5)).toLocaleDateString('tr-TR')} kapanışı getirildi.</div>;
+    if (priceAutoNote === 'none') return <div className="text-[11px] text-rose-500">Bu fon/tarih için fiyat bulunamadı — elle gir. (Bugünün fiyatı akşam yayınlanır.)</div>;
+    return null;
+  };
 
   // Satış tutarı = satılacak adet × satış fiyatı (otomatik)
   const sellAmount = useMemo(() => {
@@ -1245,6 +1292,7 @@ function App() {
                         <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Yatırılan Tutar (₺)</label><input type="text" inputMode="decimal" placeholder="0,00" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-indigo-700" value={txTotalAmount} onChange={(e) => setTxTotalAmount(e.target.value)} required /></div>
                       </div>
                       <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Alınan Adet (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{calculatedQty}</span><span className="text-slate-400 text-xs">Adet</span></div></div>
+                      {priceAutoStatus()}
                     </>
                   ) : (
                     <>
@@ -1258,6 +1306,7 @@ function App() {
                         <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Satış Fiyatı (₺/Pay)</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txPrice} onChange={(e) => setTxPrice(e.target.value)} required /></div>
                         <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Satılacak Adet</label><input type="text" inputMode="decimal" placeholder="0,000000" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-rose-700" value={txQty} onChange={(e) => setTxQty(e.target.value)} required /></div>
                       </div>
+                      {priceAutoStatus()}
                       <div className="flex items-center gap-2">
                         <button type="button" onClick={() => setTxQty(heldShares > 0 ? heldShares.toLocaleString('tr-TR', { useGrouping: false, maximumFractionDigits: 6 }) : '')} className="text-[11px] font-semibold text-rose-600 hover:bg-rose-50 px-2 py-1 rounded">Tümünü sat</button>
                         <span className="text-[11px] text-slate-400">Kısmi satış için adedi düşürebilirsiniz.</span>
