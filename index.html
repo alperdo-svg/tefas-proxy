@@ -414,8 +414,8 @@ function App() {
     // Döviz fon işlem kuru: fon değerlemesi TCMB ALIŞ + bir önceki iş günü (T-1) ile yapılır
     const rateForDate = async () => {
       if (cur === 'TRY') { setTxRateDate(null); return null; }
-      const prev = new Date(txDate + 'T00:00:00'); prev.setDate(prev.getDate() - 1);
-      const prevISO = prev.toISOString().slice(0, 10);
+      const d0 = new Date(txDate + 'T12:00:00Z'); d0.setUTCDate(d0.getUTCDate() - 1);
+      const prevISO = d0.toISOString().slice(0, 10);
       try {
         const j = await (await fetch(`/api/kur?gun=${prevISO}`)).json();
         if (j && j.ok) {
