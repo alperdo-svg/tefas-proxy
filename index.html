@@ -482,6 +482,17 @@ function App() {
     return { totalValue, totalCost, netProfit, netProfitPercent: totalCost > 0 ? (netProfit / totalCost) * 100 : 0 };
   }, [portfolio]);
 
+  // Belirli tarihe (ya da 'today') kur — nearest-previous; 'today' için TCMB güncel (bankayla uyumlu)
+  const kurAt = (dateISO, para) => {
+    if (!kur) return null;
+    if (dateISO === 'today') return para === 'EUR' ? (kur.guncel && kur.guncel.eurAlis) : (kur.guncel && kur.guncel.usdAlis);
+    const map = para === 'EUR' ? kur.eurtry : kur.usdtry;
+    if (!map) return null;
+    const ds = Object.keys(map).sort();
+    let r = null; for (const d of ds) { if (d <= dateISO) r = map[d]; else break; }
+    return r != null ? r : (ds.length ? map[ds[0]] : null);
+  };
+
   // ===== Döviz pozisyonları (dolar/euro bazında) — literatür: taban para birimi döviz, günlük mark-to-market =====
   const dovizPoz = useMemo(() => {
     const codes = [...new Set(transactions.filter((t) => t.currency && t.currency !== 'TRY').map((t) => t.fundCode))];
@@ -835,17 +846,6 @@ function App() {
   const fonAdiOf = (code) => (definedFunds.find((f) => f.code === code) || {}).name || '';
   const txCurFor = (code) => txCurOverride || fonParaBirimi(fonAdiOf(code));
   const paraSembol = (c) => (c === 'USD' ? '$' : c === 'EUR' ? '€' : '₺');
-
-  // Belirli tarihe (ya da 'today') kur — nearest-previous; 'today' için TCMB güncel (bankayla uyumlu)
-  const kurAt = (dateISO, para) => {
-    if (!kur) return null;
-    if (dateISO === 'today') return para === 'EUR' ? (kur.guncel && kur.guncel.eurAlis) : (kur.guncel && kur.guncel.usdAlis);
-    const map = para === 'EUR' ? kur.eurtry : kur.usdtry;
-    if (!map) return null;
-    const ds = Object.keys(map).sort();
-    let r = null; for (const d of ds) { if (d <= dateISO) r = map[d]; else break; }
-    return r != null ? r : (ds.length ? map[ds[0]] : null);
-  };
 
   // Endeksler ekranı için USD/TRY grafik serisi (son ~1,5 yıl)
   const kurUsdChart = useMemo(() => {
