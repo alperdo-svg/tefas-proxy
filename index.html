@@ -276,6 +276,10 @@ function App() {
   const [ozetMap, setOzetMap] = useState({});     // kod -> { buyukluk, yatirimci, pay }
   const [ozetLoading, setOzetLoading] = useState(false);
   const [ozetTarih, setOzetTarih] = useState(null);
+  // ===== Kurlar (EVDS3/TCMB) — Endeksler ekranı + döviz fon dönüşümü =====
+  const [kur, setKur] = useState(null);       // { kaynak, guncel:{...}, usdtry:{}, eurtry:{} }
+  const [kurLoading, setKurLoading] = useState(false);
+  const [kurErr, setKurErr] = useState('');
   const [showFx, setShowFx] = useState(false);    // gelişmiş filtre paneli açık mı
   const [fxTab, setFxTab] = useState('genel');    // genel | getiri | risk
   const [fxKurucu, setFxKurucu] = useState('');   // '' = Tümü
@@ -685,12 +689,32 @@ function App() {
       .finally(() => setOzetLoading(false));
   }, [activeTab]);
 
+  // Kurları getir — Endeksler sekmesi açılınca (döviz fon dönüşümü de bunu kullanır)
+  const fetchKur = () => {
+    setKurLoading(true); setKurErr('');
+    fetch('/api/kur')
+      .then((r) => r.json())
+      .then((j) => { if (j && j.ok) setKur(j); else setKurErr((j && j.error) || 'Kur alınamadı.'); })
+      .catch((e) => setKurErr('Bağlantı hatası: ' + String(e)))
+      .finally(() => setKurLoading(false));
+  };
+  useEffect(() => {
+    if (activeTab === 'endeks' && !kur && !kurLoading && !kurErr) fetchKur();
+  }, [activeTab]);
+
   const ownedCodes = useMemo(() => {
     const s = new Set();
     definedFunds.forEach((f) => s.add(f.code));
     transactions.forEach((t) => s.add(t.fundCode));
     return s;
   }, [definedFunds, transactions]);
+
+  // Endeksler ekranı için USD/TRY grafik serisi (son ~1,5 yıl)
+  const kurUsdChart = useMemo(() => {
+    if (!kur || !kur.usdtry) return [];
+    const arr = Object.entries(kur.usdtry).map(([date, value]) => ({ date, value: Number(value) })).filter((x) => x.value > 0).sort((a, b) => a.date.localeCompare(b.date));
+    return arr.slice(-380);
+  }, [kur]);
 
   const scrTypes = useMemo(() => {
     const s = new Set(scrFunds.map((f) => f.tur).filter(Boolean));
@@ -1028,9 +1052,54 @@ function App() {
         )}
         {activeTab === 'endeks' && (
           <div>
-            <h1 className="text-2xl font-bold text-slate-800 mb-1">Endeksler</h1>
-            <p className="text-sm text-slate-500 mb-6">BIST 100 ve diğer endeksler — fonların Beta/Alpha hesabı için.</p>
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-10 text-center text-slate-400">Bu ekran yakında: endeks verileri çekilecek ve hisse/karma fonların Beta, Alpha, Bilgi Oranı hesaplanacak.</div>
+            <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+              <h1 className="text-2xl font-bold text-slate-800">Kurlar & Endeksler</h1>
+              <button onClick={fetchKur} disabled={kurLoading} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold py-2 px-4 rounded-xl shadow-sm text-sm flex items-center gap-2"><RefreshCw size={15} className={kurLoading ? 'animate-spin' : ''} /> {kurLoading ? 'Geliyor…' : 'Yenile'}</button>
+            </div>
+            <p className="text-sm text-slate-500 mb-6">TCMB döviz kurları — döviz (USD/EUR) fonları bu kurdan otomatik dolar/euro bazına çevrilir.</p>
+
+            {kurErr ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-rose-600 font-medium">{kurErr}</div>
+            ) : !kur ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-slate-400">{kurLoading ? 'Kurlar yükleniyor…' : 'Kur verisi bekleniyor…'}</div>
+            ) : (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {[['USD', '🇺🇸 ABD Doları', kur.guncel.usdAlis, kur.guncel.usdSatis], ['EUR', '🇪🇺 Euro', kur.guncel.eurAlis, kur.guncel.eurSatis]].map(([kod, ad, alis, satis]) => (
+                    <div key={kod} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="font-bold text-slate-800">{ad}</div>
+                        <span className="text-[11px] font-bold text-slate-400">{kod}/TRY</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-slate-50 rounded-xl p-3">
+                          <div className="text-[11px] text-slate-400 uppercase">Döviz Alış</div>
+                          <div className="text-2xl font-extrabold text-slate-800">{alis == null ? '—' : '₺' + alis.toLocaleString('tr-TR', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</div>
+                        </div>
+                        <div className="bg-slate-50 rounded-xl p-3">
+                          <div className="text-[11px] text-slate-400 uppercase">Döviz Satış</div>
+                          <div className="text-2xl font-extrabold text-slate-600">{satis == null ? '—' : '₺' + satis.toLocaleString('tr-TR', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+                  <span>Kaynak: <b className="text-slate-500">{kur.kaynak}</b></span>
+                  <span>Kur tarihi: <b className="text-slate-500">{kur.guncel.tarih || '—'}</b></span>
+                </div>
+
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                  <div className="text-xs font-bold text-slate-500 uppercase mb-3">USD/TRY — son dönem</div>
+                  {kurUsdChart.length > 1 ? <PriceChart data={kurUsdChart} /> : <div className="p-10 text-center text-slate-400">Grafik için yeterli geçmiş kur verisi yok. (Tam geçmiş için EVDS anahtarı ekleyin.)</div>}
+                </div>
+
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 text-sm text-slate-500 leading-relaxed">
+                  <b className="text-slate-700">Otomatik eşleştirme:</b> Adında <b>(DÖVİZ)</b> / <b>DOLAR</b> / <b>USD</b> / <b>EUROBOND</b> geçen fonlar, TEFAS'ın TL fiyatı bu kura bölünerek dolar bazında değerlenir (güncel değer TCMB kuruyla, geçmiş eğri gösterge kurla). Maliyetin ise fiilen ödediğin gerçek döviz tutarıdır. <span className="text-slate-400">BIST 100 ve endeks bazlı Beta/Alfa hesapları bir sonraki adımda eklenecek.</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
         {activeTab === 'portfolio' && (
