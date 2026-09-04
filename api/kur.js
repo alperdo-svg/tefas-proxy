@@ -52,22 +52,27 @@ function pickCurrency(xml, kod) {
   return { alis: g('ForexBuying'), satis: g('ForexSelling') };
 }
 
-// --- MOD A: belirli güne ait TCMB bülteni (hafta sonu/tatilde önceki iş gününe iner) ---
+// --- Belirli güne ait TCMB bülteni (TAM o gün; yoksa null) ---
+async function tcmbFile(iso) {
+  const [y, m, day] = iso.split('-');
+  const url = `https://www.tcmb.gov.tr/kurlar/${y}${m}/${day}${m}${y}.xml`;
+  try {
+    const { status, body } = await httpsGet(url, { Accept: 'application/xml', 'User-Agent': 'Mozilla/5.0' });
+    if (status === 200 && body.indexOf('<Currency') !== -1) {
+      const usd = pickCurrency(body, 'USD'), eur = pickCurrency(body, 'EUR');
+      const tm = body.match(/Tarih="([^"]+)"/);
+      let tarih = iso; if (tm) { const p = tm[1].split('.'); if (p.length === 3) tarih = `${p[2]}-${p[1]}-${p[0]}`; }
+      return { tarih, usdAlis: usd.alis, usdSatis: usd.satis, eurAlis: eur.alis, eurSatis: eur.satis };
+    }
+  } catch {}
+  return null;
+}
+// Hafta sonu/tatilde önceki iş gününe iner (tek gün için)
 async function tcmbGun(iso) {
   let d = new Date(iso + 'T00:00:00');
   for (let i = 0; i < 8; i++) {
-    const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
-    const url = `https://www.tcmb.gov.tr/kurlar/${y}${m}/${day}${m}${y}.xml`;
-    try {
-      const { status, body } = await httpsGet(url, { Accept: 'application/xml', 'User-Agent': 'Mozilla/5.0' });
-      if (status === 200 && body.indexOf('<Currency') !== -1) {
-        const usd = pickCurrency(body, 'USD'), eur = pickCurrency(body, 'EUR');
-        const tm = body.match(/Tarih="([^"]+)"/);
-        let tarih = `${y}-${m}-${day}`;
-        if (tm) { const p = tm[1].split('.'); if (p.length === 3) tarih = `${p[2]}-${p[1]}-${p[0]}`; }
-        return { tarih, usdAlis: usd.alis, usdSatis: usd.satis, eurAlis: eur.alis, eurSatis: eur.satis };
-      }
-    } catch {}
+    const g = await tcmbFile(d.toISOString().slice(0, 10));
+    if (g && g.usdAlis != null) return g;
     d.setDate(d.getDate() - 1);
   }
   return null;
@@ -135,6 +140,21 @@ module.exports = async (req, res) => {
     GUN_CACHE[gun] = g;
     res.setHeader('Cache-Control', 'public, s-maxage=86400, stale-while-revalidate=604800');
     res.status(200).json({ ok: true, gun, ...g });
+    return;
+  }
+
+  // ---- MOD A2: TCMB günlük bülten ARALIĞI (liste için gerçek TCMB alış+satış, anahtarsız) ----
+  if (q.tcmbBas && q.tcmbBit) {
+    const b1 = String(q.tcmbBas), b2 = String(q.tcmbBit);
+    const days = [];
+    let d = new Date(b1 + 'T00:00:00'); const end = new Date(b2 + 'T00:00:00');
+    while (d <= end && days.length < 70) { const wd = d.getDay(); if (wd !== 0 && wd !== 6) days.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1); }
+    const gunler = {}; const need = [];
+    for (const g of days) { if (GUN_CACHE[g]) gunler[g] = GUN_CACHE[g]; else need.push(g); }
+    const one = async (g) => { const r = await tcmbFile(g); if (r && r.usdAlis != null) { GUN_CACHE[g] = r; gunler[g] = r; } };
+    for (let i = 0; i < need.length; i += 10) { await Promise.all(need.slice(i, i + 10).map(one)); }
+    res.setHeader('Cache-Control', 'public, s-maxage=86400, stale-while-revalidate=604800');
+    res.status(200).json({ ok: true, bas: b1, bit: b2, kaynak: 'TCMB günlük bülten', gunler });
     return;
   }
 
