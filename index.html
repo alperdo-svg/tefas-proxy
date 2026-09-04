@@ -256,6 +256,7 @@ function App() {
   const [priceAutoNote, setPriceAutoNote] = useState(''); // '', 'ok:YYYY-MM-DD', 'near:YYYY-MM-DD', 'none'
   const [txCurOverride, setTxCurOverride] = useState(null); // null=otomatik, 'TRY'|'USD'|'EUR'
   const [txRate, setTxRate] = useState(null); // seçili tarih için USDTRY/EURTRY (döviz fonda)
+  const [txRateDate, setTxRateDate] = useState(null); // kurun ait olduğu tarih (T-1 TCMB)
   const [txQty, setTxQty] = useState(''); // satışta: satılacak adet (varsayılan = elindeki)
   const [priceUpdateFund, setPriceUpdateFund] = useState('');
   const [priceUpdateDate, setPriceUpdateDate] = useState(new Date().toISOString().split('T')[0]);
@@ -410,22 +411,22 @@ function App() {
       for (const h of s) { if (h.date <= target) r = h; else break; }
       return r || (s.length ? s[0] : null);
     };
-    // seçili tarihe döviz kuru (döviz fon için) — global kur varsa oradan, yoksa hedefli çek
+    // Döviz fon işlem kuru: fon değerlemesi TCMB ALIŞ + bir önceki iş günü (T-1) ile yapılır
     const rateForDate = async () => {
-      if (cur === 'TRY') return null;
-      let r = kurAt(txDate, cur);
-      if (r != null) return r;
+      if (cur === 'TRY') { setTxRateDate(null); return null; }
+      const prev = new Date(txDate + 'T00:00:00'); prev.setDate(prev.getDate() - 1);
+      const prevISO = prev.toISOString().slice(0, 10);
       try {
-        const d0 = new Date(txDate); const bas = new Date(d0 - 10 * 86400000).toISOString().slice(0, 10);
-        const j = await (await fetch(`/api/kur?bas=${bas}&bit=${txDate}`)).json();
+        const j = await (await fetch(`/api/kur?gun=${prevISO}`)).json();
         if (j && j.ok) {
-          const map = cur === 'EUR' ? j.eurtry : j.usdtry;
-          const ds = Object.keys(map || {}).sort(); let v = null;
-          for (const d of ds) { if (d <= txDate) v = map[d]; else break; }
-          return v != null ? v : (j.guncel ? (cur === 'EUR' ? j.guncel.eurAlis : j.guncel.usdAlis) : null);
+          const alis = cur === 'EUR' ? j.eurAlis : j.usdAlis;
+          if (alis) { setTxRateDate(j.tarih || prevISO); return alis; }
         }
       } catch {}
-      return null;
+      // yedek: global seri (ECB göstergesi)
+      const r = kurAt(txDate, cur);
+      setTxRateDate(r != null ? '~' + txDate : null);
+      return r;
     };
     const fill = async () => {
       setPriceAutoLoading(true);
@@ -457,7 +458,9 @@ function App() {
     const [tag, rest] = priceAutoNote.split(':');
     const norate = priceAutoNote.includes('|norate');
     const d = rest ? rest.split('|')[0] : '';
-    const tlSatir = (cur !== 'TRY' && txRate) ? ` · ${cur}/TRY ${txRate.toLocaleString('tr-TR', { maximumFractionDigits: 4 })} (TCMB)` : '';
+    const tlSatir = (cur !== 'TRY' && txRate)
+      ? ` · ${cur}/TRY ${txRate.toLocaleString('tr-TR', { maximumFractionDigits: 4 })} ${txRateDate && txRateDate.startsWith('~') ? '(ECB gösterge ' + txRateDate.slice(1) + ')' : 'TCMB alış ' + (txRateDate || '')}`
+      : '';
     if (tag === 'ok') return <div className="text-[11px] text-emerald-600">✓ {new Date(d).toLocaleDateString('tr-TR')} fiyatı otomatik geldi{cur !== 'TRY' ? ` — ${cur} bazına çevrildi` : ''}{tlSatir}</div>;
     if (tag === 'near') return <div className="text-[11px] text-amber-600">≈ Bu tarihe fiyat yok; en yakın {new Date(d).toLocaleDateString('tr-TR')} kapanışı getirildi{tlSatir}</div>;
     if (priceAutoNote === 'none') return <div className="text-[11px] text-rose-500">Bu fon/tarih için fiyat bulunamadı — elle gir. (Bugünün fiyatı akşam yayınlanır.)</div>;
@@ -582,7 +585,7 @@ function App() {
       const amountNative = qty * prc;
       setTransactions((prev) => [...prev, { id: newId(), type: 'sell', fundCode, quantity: qty, price: priceTL, totalAmount: totalTL, currency: cur, rate: cur === 'TRY' ? null : rate, priceNative: prc, amountNative, date: txDate, createdAt: Date.now() }]);
     }
-    setFundCode(''); setTxPrice(''); setTxTotalAmount(''); setTxQty(''); setTxCurOverride(null); setTxRate(null);
+    setFundCode(''); setTxPrice(''); setTxTotalAmount(''); setTxQty(''); setTxCurOverride(null); setTxRate(null); setTxRateDate(null);
   };
 
   const handleAddDefinedFund = (e) => {
