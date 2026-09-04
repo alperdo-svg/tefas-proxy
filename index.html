@@ -280,6 +280,13 @@ function App() {
   const [kur, setKur] = useState(null);       // { kaynak, guncel:{...}, usdtry:{}, eurtry:{} }
   const [kurLoading, setKurLoading] = useState(false);
   const [kurErr, setKurErr] = useState('');
+  // Geçmiş Kurlar listesi (döviz + tarih aralığı seçimi)
+  const [klPara, setKlPara] = useState('USD');           // USD | EUR
+  const [klBas, setKlBas] = useState(() => new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+  const [klBit, setKlBit] = useState(() => new Date().toISOString().slice(0, 10));
+  const [klData, setKlData] = useState(null);            // { usdtry, eurtry, usdtrySatis?, eurtrySatis? }
+  const [klLoading, setKlLoading] = useState(false);
+  const [klErr, setKlErr] = useState('');
   const [showFx, setShowFx] = useState(false);    // gelişmiş filtre paneli açık mı
   const [fxTab, setFxTab] = useState('genel');    // genel | getiri | risk
   const [fxKurucu, setFxKurucu] = useState('');   // '' = Tümü
@@ -716,6 +723,55 @@ function App() {
     return arr.slice(-380);
   }, [kur]);
 
+  // Geçmiş Kurlar listesi — seçilen tarih aralığını çek
+  const fetchKurList = () => {
+    if (klBas > klBit) { showAlert('Tarih Hatası', 'Başlangıç tarihi bitişten sonra olamaz.'); return; }
+    setKlLoading(true); setKlErr('');
+    fetch(`/api/kur?bas=${klBas}&bit=${klBit}`)
+      .then((r) => r.json())
+      .then((j) => { if (j && j.ok) setKlData(j); else setKlErr((j && j.error) || 'Kur alınamadı.'); })
+      .catch((e) => setKlErr('Bağlantı hatası: ' + String(e)))
+      .finally(() => setKlLoading(false));
+  };
+  const kurListRows = useMemo(() => {
+    if (!klData) return [];
+    const alisMap = klPara === 'USD' ? klData.usdtry : klData.eurtry;
+    const satisMap = klPara === 'USD' ? klData.usdtrySatis : klData.eurtrySatis;
+    if (!alisMap) return [];
+    const dates = Object.keys(alisMap).sort(); // artan (Δ için)
+    const rows = dates.map((d, i) => {
+      const alis = Number(alisMap[d]);
+      const prev = i > 0 ? Number(alisMap[dates[i - 1]]) : null;
+      const chg = (prev && prev > 0) ? (alis / prev - 1) * 100 : null;
+      return { date: d, alis, satis: satisMap && satisMap[d] != null ? Number(satisMap[d]) : null, chg };
+    });
+    return rows.reverse(); // en yeni üstte
+  }, [klData, klPara]);
+  const kurHasSatis = useMemo(() => kurListRows.some((r) => r.satis != null), [kurListRows]);
+
+  const exportKurList = () => {
+    if (!kurListRows.length) { showAlert('Veri Yok', 'Önce tarih aralığı seçip "Getir"e basın.'); return; }
+    const header = kurHasSatis ? ['Tarih', klPara + '/TRY Alış', klPara + '/TRY Satış', 'Günlük %'] : ['Tarih', klPara + '/TRY', 'Günlük %'];
+    const body = [...kurListRows].reverse().map((r) => kurHasSatis
+      ? [r.date, r.alis, r.satis, r.chg == null ? '' : Number(r.chg.toFixed(4))]
+      : [r.date, r.alis, r.chg == null ? '' : Number(r.chg.toFixed(4))]);
+    const rows = [header, ...body];
+    const fname = `kur_${klPara}_${klBas}_${klBit}`;
+    try {
+      if (window.XLSX) {
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        ws['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 10 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, klPara);
+        XLSX.writeFile(wb, fname + '.xlsx');
+      } else {
+        const csv = rows.map((r) => r.join(';')).join('\n');
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fname + '.csv'; a.click();
+      }
+    } catch { showAlert('Hata', 'Dışa aktarma başarısız.'); }
+  };
+
   const scrTypes = useMemo(() => {
     const s = new Set(scrFunds.map((f) => f.tur).filter(Boolean));
     return Array.from(s).sort((a, b) => a.localeCompare(b, 'tr'));
@@ -1093,6 +1149,53 @@ function App() {
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
                   <div className="text-xs font-bold text-slate-500 uppercase mb-3">USD/TRY — son dönem</div>
                   {kurUsdChart.length > 1 ? <PriceChart data={kurUsdChart} /> : <div className="p-10 text-center text-slate-400">Grafik için yeterli geçmiş kur verisi yok. (Tam geçmiş için EVDS anahtarı ekleyin.)</div>}
+                </div>
+
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                  <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                    <div className="text-xs font-bold text-slate-500 uppercase">Geçmiş Kurlar (liste)</div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="inline-flex bg-slate-100 rounded-lg p-1 gap-1">
+                        {['USD', 'EUR'].map((p) => (<button key={p} onClick={() => setKlPara(p)} className={`px-3 py-1 rounded-md text-xs font-bold ${klPara === p ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{p}/TRY</button>))}
+                      </div>
+                      <input type="date" value={klBas} onChange={(e) => setKlBas(e.target.value)} className="border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm outline-none" />
+                      <span className="text-slate-300">–</span>
+                      <input type="date" value={klBit} onChange={(e) => setKlBit(e.target.value)} className="border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm outline-none" />
+                      <button onClick={fetchKurList} disabled={klLoading} className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold py-1.5 px-3 rounded-lg text-sm flex items-center gap-1"><RefreshCw size={14} className={klLoading ? 'animate-spin' : ''} /> Getir</button>
+                      <button onClick={exportKurList} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-1.5 px-3 rounded-lg text-sm flex items-center gap-1"><Download size={14} /> Excel</button>
+                    </div>
+                  </div>
+                  {klErr ? <div className="p-6 text-center text-rose-600 text-sm">{klErr}</div>
+                    : !klData ? <div className="p-6 text-center text-slate-400 text-sm">{klLoading ? 'Yükleniyor…' : 'Döviz ve tarih aralığı seçip "Getir"e basın.'}</div>
+                    : kurListRows.length === 0 ? <div className="p-6 text-center text-slate-400 text-sm">Bu aralıkta kur verisi yok.</div>
+                    : (
+                      <>
+                        <div className="text-[11px] text-slate-400 mb-2">{kurListRows.length} gün · {klBas} → {klBit}</div>
+                        <div className="max-h-96 overflow-auto border border-slate-100 rounded-xl">
+                          <table className="w-full text-sm">
+                            <thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0">
+                              <tr>
+                                <th className="p-3 text-left font-bold">Tarih</th>
+                                <th className="p-3 text-right font-bold">Alış (₺)</th>
+                                {kurHasSatis && <th className="p-3 text-right font-bold">Satış (₺)</th>}
+                                <th className="p-3 text-right font-bold">Günlük Δ</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {kurListRows.map((r) => (
+                                <tr key={r.date} className="hover:bg-slate-50">
+                                  <td className="p-3 text-slate-600 font-medium whitespace-nowrap">{new Date(r.date).toLocaleDateString('tr-TR')}</td>
+                                  <td className="p-3 text-right font-mono text-slate-800">{r.alis == null ? '—' : r.alis.toLocaleString('tr-TR', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</td>
+                                  {kurHasSatis && <td className="p-3 text-right font-mono text-slate-600">{r.satis == null ? '—' : r.satis.toLocaleString('tr-TR', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</td>}
+                                  <td className={`p-3 text-right font-bold ${r.chg == null ? 'text-slate-300' : r.chg >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.chg == null ? '—' : (r.chg > 0 ? '+' : '') + r.chg.toLocaleString('tr-TR', { maximumFractionDigits: 2 }) + '%'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {!kurHasSatis && <div className="mt-2 text-[11px] text-slate-400">Satış kuru geçmişi için EVDS anahtarı gerekir (şu an ECB göstergesi tek kur veriyor; "Alış" = gösterge kur).</div>}
+                      </>
+                    )}
                 </div>
 
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 text-sm text-slate-500 leading-relaxed">
