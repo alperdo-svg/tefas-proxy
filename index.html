@@ -858,23 +858,24 @@ function App() {
   const fetchKurList = () => {
     if (klBas > klBit) { showAlert('Tarih Hatası', 'Başlangıç tarihi bitişten sonra olamaz.'); return; }
     setKlLoading(true); setKlErr('');
-    fetch(`/api/kur?bas=${klBas}&bit=${klBit}`)
+    fetch(`/api/kur?tcmbBas=${klBas}&tcmbBit=${klBit}`)
       .then((r) => r.json())
       .then((j) => { if (j && j.ok) setKlData(j); else setKlErr((j && j.error) || 'Kur alınamadı.'); })
       .catch((e) => setKlErr('Bağlantı hatası: ' + String(e)))
       .finally(() => setKlLoading(false));
   };
   const kurListRows = useMemo(() => {
-    if (!klData) return [];
-    const alisMap = klPara === 'USD' ? klData.usdtry : klData.eurtry;
-    const satisMap = klPara === 'USD' ? klData.usdtrySatis : klData.eurtrySatis;
-    if (!alisMap) return [];
-    const dates = Object.keys(alisMap).sort(); // artan (Δ için)
+    if (!klData || !klData.gunler) return [];
+    const aKey = klPara === 'USD' ? 'usdAlis' : 'eurAlis';
+    const sKey = klPara === 'USD' ? 'usdSatis' : 'eurSatis';
+    const dates = Object.keys(klData.gunler).sort(); // artan (Δ için)
     const rows = dates.map((d, i) => {
-      const alis = Number(alisMap[d]);
-      const prev = i > 0 ? Number(alisMap[dates[i - 1]]) : null;
-      const chg = (prev && prev > 0) ? (alis / prev - 1) * 100 : null;
-      return { date: d, alis, satis: satisMap && satisMap[d] != null ? Number(satisMap[d]) : null, chg };
+      const g = klData.gunler[d] || {};
+      const alis = g[aKey] != null ? Number(g[aKey]) : null;
+      const prevG = i > 0 ? klData.gunler[dates[i - 1]] : null;
+      const prev = prevG && prevG[aKey] != null ? Number(prevG[aKey]) : null;
+      const chg = (prev && prev > 0 && alis != null) ? (alis / prev - 1) * 100 : null;
+      return { date: d, alis, satis: g[sKey] != null ? Number(g[sKey]) : null, chg };
     });
     return rows.reverse(); // en yeni üstte
   }, [klData, klPara]);
@@ -1324,7 +1325,7 @@ function App() {
                             </tbody>
                           </table>
                         </div>
-                        {!kurHasSatis && <div className="mt-2 text-[11px] text-slate-400">Satış kuru geçmişi için EVDS anahtarı gerekir (şu an ECB göstergesi tek kur veriyor; "Alış" = gösterge kur).</div>}
+                        {klData && <div className="mt-2 text-[11px] text-slate-400">Kaynak: <b className="text-slate-500">{klData.kaynak || 'TCMB günlük bülten'}</b> — gerçek TCMB alış/satış. {!kurHasSatis ? 'Bu aralıkta satış kuru bulunamadı.' : ''} Uzun aralıkta çok gün çekildiği için ilk yükleme yavaş olabilir (sonra önbellekten hızlı).</div>}
                       </>
                     )}
                 </div>
