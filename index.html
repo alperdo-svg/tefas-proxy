@@ -744,6 +744,24 @@ function App() {
 
   const selectedHistory = historyViewFund && priceHistory[historyViewFund] ? [...priceHistory[historyViewFund]].sort((a, b) => b.date.localeCompare(a.date)) : [];
 
+  // Döviz fonlarda: her günün TL fiyatı ÷ bir önceki iş günü TCMB alışı = döviz birim fiyat
+  const selectedHistoryUsd = useMemo(() => {
+    const cur = historyViewFund ? fonParaBirimi(fonAdiOf(historyViewFund)) : 'TRY';
+    const rows = historyViewFund && priceHistory[historyViewFund]
+      ? [...priceHistory[historyViewFund]].sort((a, b) => b.date.localeCompare(a.date))
+      : [];
+    if (cur === 'TRY' || !kur) return { cur, rows: rows.map((r) => ({ ...r, doviz: null })) };
+    const map = cur === 'EUR' ? kur.eurtry : kur.usdtry;
+    if (!map) return { cur, rows: rows.map((r) => ({ ...r, doviz: null })) };
+    const dates = Object.keys(map).sort(); // artan
+    const prevRate = (d) => { // tarihten KESİN önceki (T-1) günün kuru — binary search
+      let lo = 0, hi = dates.length - 1, ans = null;
+      while (lo <= hi) { const mid = (lo + hi) >> 1; if (dates[mid] < d) { ans = dates[mid]; lo = mid + 1; } else hi = mid - 1; }
+      return ans != null ? map[ans] : null;
+    };
+    return { cur, rows: rows.map((r) => { const rt = prevRate(r.date); return { ...r, doviz: rt ? r.value / rt : null }; }) };
+  }, [historyViewFund, priceHistory, kur]);
+
   // --- Rapor verileri ---
   const reportHist = reportFund && priceHistory[reportFund] ? [...priceHistory[reportFund]].sort((a, b) => a.date.localeCompare(b.date)) : [];
   const reportReturns = useMemo(() => computeReturns(reportHist), [reportFund, priceHistory]);
@@ -1465,12 +1483,13 @@ function App() {
                   </select>
                   <ChevronDown size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 </div>
-                {historyViewFund ? (selectedHistory.length ? (
+                {historyViewFund ? (selectedHistoryUsd.rows.length ? (
                   <div className="max-h-72 overflow-y-auto border border-slate-100 rounded-xl">
-                    <table className="w-full text-sm"><thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0"><tr><th className="p-3 text-left font-bold">Tarih</th><th className="p-3 text-right font-bold">Kapanış (₺)</th></tr></thead>
-                    <tbody className="divide-y divide-slate-100">{selectedHistory.map((r) => <tr key={r.date} className="hover:bg-slate-50"><td className="p-3 text-slate-600 font-medium">{new Date(r.date).toLocaleDateString('tr-TR')}</td><td className="p-3 text-right font-mono text-slate-800">{fmtPrice(r.value)}</td></tr>)}</tbody></table>
+                    <table className="w-full text-sm"><thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0"><tr><th className="p-3 text-left font-bold">Tarih</th><th className="p-3 text-right font-bold">Kapanış (₺)</th>{selectedHistoryUsd.cur !== 'TRY' && <th className="p-3 text-right font-bold">{paraSembol(selectedHistoryUsd.cur)} Fiyat</th>}</tr></thead>
+                    <tbody className="divide-y divide-slate-100">{selectedHistoryUsd.rows.map((r) => <tr key={r.date} className="hover:bg-slate-50"><td className="p-3 text-slate-600 font-medium">{new Date(r.date).toLocaleDateString('tr-TR')}</td><td className="p-3 text-right font-mono text-slate-800">{fmtPrice(r.value)}</td>{selectedHistoryUsd.cur !== 'TRY' && <td className="p-3 text-right font-mono text-indigo-700">{r.doviz == null ? '—' : paraSembol(selectedHistoryUsd.cur) + r.doviz.toLocaleString('tr-TR', { minimumFractionDigits: 6, maximumFractionDigits: 6 })}</td>}</tr>)}</tbody></table>
                   </div>
                 ) : <p className="text-sm text-slate-400 italic py-4 text-center">Bu fon için henüz kayıt yok.</p>) : <p className="text-sm text-slate-400 italic py-4 text-center">Tüm kapanış fiyatları burada tarih tarih saklanır.</p>}
+                {selectedHistoryUsd.cur !== 'TRY' && selectedHistoryUsd.rows.length > 0 && <p className="text-[11px] text-slate-400 mt-2">{paraSembol(selectedHistoryUsd.cur)} fiyat = TL kapanış ÷ bir önceki iş günü {selectedHistoryUsd.cur}/TRY {kur ? '(' + (kur.kaynak || '') + ')' : ''}. Kur gelmediyse "—" görünür; Endeksler'den yenileyin.</p>}
               </div>
             </div>
           </div>
