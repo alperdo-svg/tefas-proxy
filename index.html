@@ -493,6 +493,17 @@ function App() {
     return r != null ? r : (ds.length ? map[ds[0]] : null);
   };
 
+  // Fon adından para birimi: (DÖVİZ)/DOLAR/USD/EUROBOND -> USD, EUR/AVRO -> EUR, diğer -> TRY
+  const fonParaBirimi = (ad) => {
+    const s = (ad || '').toLocaleUpperCase('tr');
+    if (s.includes('(DÖVIZ)') || s.includes('(DÖVİZ)') || s.includes('DOLAR') || /\bUSD\b/.test(s) || s.includes('EUROBOND')) return 'USD';
+    if (/\bEUR\b/.test(s) || s.includes('AVRO')) return 'EUR';
+    return 'TRY';
+  };
+  const fonAdiOf = (code) => (definedFunds.find((f) => f.code === code) || {}).name || '';
+  const txCurFor = (code) => txCurOverride || fonParaBirimi(fonAdiOf(code));
+  const paraSembol = (c) => (c === 'USD' ? '$' : c === 'EUR' ? '€' : '₺');
+
   // ===== Döviz pozisyonları (dolar/euro bazında) — literatür: taban para birimi döviz, günlük mark-to-market =====
   const dovizPoz = useMemo(() => {
     const codes = [...new Set(transactions.filter((t) => t.currency && t.currency !== 'TRY').map((t) => t.fundCode))];
@@ -854,16 +865,6 @@ function App() {
     return s;
   }, [definedFunds, transactions]);
 
-  // Fon adından para birimi: (DÖVİZ)/DOLAR/USD/EUROBOND -> USD, EUR/AVRO -> EUR, diğer -> TRY
-  const fonParaBirimi = (ad) => {
-    const s = (ad || '').toLocaleUpperCase('tr');
-    if (s.includes('(DÖVIZ)') || s.includes('(DÖVİZ)') || s.includes('DOLAR') || /\bUSD\b/.test(s) || s.includes('EUROBOND')) return 'USD';
-    if (/\bEUR\b/.test(s) || s.includes('AVRO')) return 'EUR';
-    return 'TRY';
-  };
-  const fonAdiOf = (code) => (definedFunds.find((f) => f.code === code) || {}).name || '';
-  const txCurFor = (code) => txCurOverride || fonParaBirimi(fonAdiOf(code));
-  const paraSembol = (c) => (c === 'USD' ? '$' : c === 'EUR' ? '€' : '₺');
 
   // Endeksler ekranı için USD/TRY grafik serisi (son ~1,5 yıl)
   const kurUsdChart = useMemo(() => {
