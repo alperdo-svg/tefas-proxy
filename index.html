@@ -226,11 +226,26 @@ function App() {
   const [definedFunds, setDefinedFunds] = useState(() => load('definedFunds', SEED_FUNDS));
   const [priceHistory, setPriceHistory] = useState(() => load('priceHistory', {}));
   const [favorites, setFavorites] = useState(() => load('favorites', [])); // favori fon kodları
+  // ===== Portföyler (bireysel / kurumsal ayrımı) =====
+  const [portfolios, setPortfolios] = useState(() => load('portfolios', [{ id: 'p1', name: 'Bireysel', type: 'bireysel' }]));
+  const [activePf, setActivePf] = useState(() => load('activePf', 'all')); // 'all' | portföy id
+  const [txPortfolio, setTxPortfolio] = useState(null);   // yeni işlemin ekleneceği portföy id
+  const [pfEditing, setPfEditing] = useState(null);       // rename modundaki portföy id
+  const [pfEditName, setPfEditName] = useState('');
+  const [stopajRateOverride, setStopajRateOverride] = useState(null); // satışta elle girilen stopaj oranı (null=otomatik)
 
   useEffect(() => save('transactions', transactions), [transactions]);
   useEffect(() => save('definedFunds', definedFunds), [definedFunds]);
   useEffect(() => save('priceHistory', priceHistory), [priceHistory]);
   useEffect(() => save('favorites', favorites), [favorites]);
+  useEffect(() => save('portfolios', portfolios), [portfolios]);
+  useEffect(() => save('activePf', activePf), [activePf]);
+  // Eski işlemlere portföy ata (portföyId'si olmayanlar ilk portföye)
+  useEffect(() => {
+    const def = portfolios[0] ? portfolios[0].id : 'p1';
+    setTransactions((prev) => prev.some((t) => !t.portfolioId) ? prev.map((t) => t.portfolioId ? t : { ...t, portfolioId: def }) : prev);
+    setPortfolios((prev) => prev.some((p) => !p.type) ? prev.map((p) => p.type ? p : { ...p, type: p.name.toLocaleLowerCase('tr').includes('kurumsal') ? 'kurumsal' : 'bireysel' }) : prev);
+  }, []);
 
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
@@ -370,9 +385,12 @@ function App() {
     return '0.000000';
   }, [txPrice, txTotalAmount]);
 
+  // Seçili portföyün işlemleri ('all' = hepsi)
+  const visTx = useMemo(() => activePf === 'all' ? transactions : transactions.filter((t) => (t.portfolioId || (portfolios[0] && portfolios[0].id)) === activePf), [transactions, activePf, portfolios]);
+
   const portfolio = useMemo(() => {
     const holdings = {};
-    transactions.forEach((t) => {
+    visTx.forEach((t) => {
       if (!holdings[t.fundCode]) holdings[t.fundCode] = { code: t.fundCode, quantity: 0, totalCost: 0 };
       const h = holdings[t.fundCode];
       const qty = parseFloat(t.quantity), prc = parseFloat(t.price);
@@ -387,13 +405,24 @@ function App() {
       const fundDetails = definedFunds.find((f) => f.code === h.code);
       return { ...h, name: fundDetails ? fundDetails.name : '', avgCost, currentPrice: marketData.value, priceDate: marketData.date, currentValue, profitLoss, profitLossPercent: h.totalCost > 0 ? (profitLoss / h.totalCost) * 100 : 0 };
     });
-  }, [transactions, marketPrices, definedFunds]);
+  }, [visTx, marketPrices, definedFunds]);
 
-  // Seçili fonda elde tutulan net pay adedi (alış - satış)
+  // Seçili fonda, işlem yapılacak portföyde elde tutulan net pay adedi
   const heldShares = useMemo(() => {
-    if (!fundCode) return 0;
-    return transactions.filter((t) => t.fundCode === fundCode).reduce((s, t) => s + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)), 0);
-  }, [fundCode, transactions]);
+    if (!fundCode || !txPortfolio) return 0;
+    return transactions.filter((t) => t.fundCode === fundCode && t.portfolioId === txPortfolio).reduce((s, t) => s + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)), 0);
+  }, [fundCode, transactions, txPortfolio]);
+
+  // Satış için: seçili fonun (o portföydeki) ortalama TL maliyeti + ilk alış tarihi
+  const sellBasis = useMemo(() => {
+    if (!fundCode || !txPortfolio) return null;
+    const buys = transactions.filter((t) => t.fundCode === fundCode && t.portfolioId === txPortfolio && t.type === 'buy');
+    if (!buys.length) return null;
+    const q = buys.reduce((s, t) => s + parseFloat(t.quantity), 0);
+    const cost = buys.reduce((s, t) => s + parseFloat(t.quantity) * parseFloat(t.price), 0);
+    const firstDate = buys.reduce((m, t) => (t.date < m ? t.date : m), buys[0].date);
+    return { avgBuyTL: q > 0 ? cost / q : 0, firstDate };
+  }, [fundCode, txPortfolio, transactions]);
 
   // Satış modunda fon seçilince/moda geçilince adedi elindeki adetle doldur
   useEffect(() => {
@@ -506,11 +535,57 @@ function App() {
   const txCurFor = (code) => txCurOverride || fonParaBirimi(fonAdiOf(code));
   const paraSembol = (c) => (c === 'USD' ? '$' : c === 'EUR' ? '€' : '₺');
 
+  // ===== Stopaj (vergi) yardımcıları =====
+  const isParaPiyasasi = (ad) => (ad || '').toLocaleUpperCase('tr').includes('PARA PİYASASI');
+  const pfType = (id) => (portfolios.find((p) => p.id === id) || {}).type || 'bireysel';
+  // Otomatik stopaj oranı: kurumsal+para piyasası %10, kurumsal+diğer %0; bireysel+para piyasası %17,5, bireysel+diğer %10
+  const autoStopaj = (ad, type) => { const pp = isParaPiyasasi(ad); return type === 'kurumsal' ? (pp ? 10 : 0) : (pp ? 17.5 : 10); };
+  const STOPAJ_TARIH = '2026-09-04'; // kurumsal para piyasası ayrım günü (4 Eylül kapanışı; 5 Eylül'den itibaren %10)
+  // Bir fonun belirli tarihe (nearest ≤) ait TL kapanış fiyatı
+  const fiyatAt = (code, dateISO) => {
+    const h = priceHistory[code] || []; if (!h.length) return null;
+    const s = [...h].filter((x) => x.value > 0).sort((a, b) => a.date.localeCompare(b.date));
+    let r = null; for (const x of s) { if (x.date <= dateISO) r = x; else break; }
+    return r ? r.value : null;
+  };
+
+  // Satış anındaki stopaj / net ele geçen hesabı (canlı)
+  const stopajInfo = useMemo(() => {
+    if (txType !== 'sell' || !fundCode || !txPortfolio || !sellBasis) return null;
+    const cur = txCurFor(fundCode);
+    const rate = cur === 'TRY' ? 1 : (txRate || null);
+    const q = parseTRNumber(txQty), pS = parseTRNumber(txPrice);
+    if (!(q > 0) || !(pS > 0) || (cur !== 'TRY' && !rate)) return { incomplete: true };
+    const sellTL = cur === 'TRY' ? pS : pS * rate;
+    const brutTL = q * sellTL;
+    const maliyetTL = q * sellBasis.avgBuyTL;
+    const kazancTL = brutTL - maliyetTL;
+    const type = pfType(txPortfolio);
+    const ad = fonAdiOf(fundCode);
+    const pp = isParaPiyasasi(ad);
+    const autoRate = autoStopaj(ad, type);
+    const oRate = stopajRateOverride != null && stopajRateOverride !== '' ? parseTRNumber(stopajRateOverride) : autoRate;
+    const rateUsed = isNaN(oRate) ? autoRate : oRate;
+    // 5 Eylül kısmi ayrım: kurumsal + para piyasası + 5 Eylül öncesi alım
+    let taxableTL = Math.max(0, kazancTL); let split = null;
+    if (type === 'kurumsal' && pp && sellBasis.firstDate < '2026-09-05') {
+      const p4 = fiyatAt(fundCode, STOPAJ_TARIH);
+      if (p4) {
+        const postGainTL = Math.max(0, (sellTL - p4) * q);   // 5 Eylül sonrası (stopajlı)
+        const preGainTL = (p4 - sellBasis.avgBuyTL) * q;      // öncesi (stopajsız)
+        taxableTL = postGainTL; split = { p4, preGainTL, postGainTL };
+      }
+    }
+    const stopajTL = Math.max(0, taxableTL) * rateUsed / 100;
+    const netTL = brutTL - stopajTL;
+    return { cur, rate, sellTL, brutTL, maliyetTL, kazancTL, type, pp, autoRate, rateUsed, taxableTL, stopajTL, netTL, split, overridden: stopajRateOverride != null && stopajRateOverride !== '' };
+  }, [txType, fundCode, txPortfolio, txQty, txPrice, txRate, sellBasis, stopajRateOverride, portfolios, priceHistory, txCurOverride]);
+
   // ===== Döviz pozisyonları (dolar/euro bazında) — literatür: taban para birimi döviz, günlük mark-to-market =====
   const dovizPoz = useMemo(() => {
-    const codes = [...new Set(transactions.filter((t) => t.currency && t.currency !== 'TRY').map((t) => t.fundCode))];
+    const codes = [...new Set(visTx.filter((t) => t.currency && t.currency !== 'TRY').map((t) => t.fundCode))];
     return codes.map((code) => {
-      const txs = transactions.filter((t) => t.fundCode === code);
+      const txs = visTx.filter((t) => t.fundCode === code);
       const cur = (txs.find((t) => t.currency) || {}).currency || 'USD';
       const netShares = txs.reduce((s, t) => s + (t.type === 'buy' ? t.quantity : -t.quantity), 0);
       const buys = txs.filter((t) => t.type === 'buy');
@@ -531,15 +606,15 @@ function App() {
       const usdRet = (dovizValue != null && usdIn > 0) ? (dovizValue / usdIn - 1) * 100 : null;
       return { code, name: (definedFunds.find((f) => f.code === code) || {}).name || '', cur, netShares, usdIn, tlToday, rateToday, dovizValue, dovizPL, tlValue, tlRet, fxRet, usdRet };
     }).filter((x) => x.netShares > 0.000001);
-  }, [transactions, priceHistory, kur, definedFunds]);
+  }, [visTx, priceHistory, kur, definedFunds]);
 
   // ===== Yuvarlanan bakiye pozisyonları (Excel "İşlemdeki fon bakiyesi" mantığı) =====
   // Her fon için: pozisyon satılana kadar bakiye her kapanışta bileşik büyür; alımlar ekler, satışlar düşer.
   const positions = useMemo(() => {
-    const codes = [...new Set(transactions.map((t) => t.fundCode))];
+    const codes = [...new Set(visTx.map((t) => t.fundCode))];
     const out = [];
     codes.forEach((code) => {
-      const txs = transactions.filter((t) => t.fundCode === code).slice().sort((a, b) => a.date.localeCompare(b.date));
+      const txs = visTx.filter((t) => t.fundCode === code).slice().sort((a, b) => a.date.localeCompare(b.date));
       if (!txs.length) return;
       const fund = definedFunds.find((f) => f.code === code);
       const firstBuy = txs[0].date;
@@ -582,10 +657,11 @@ function App() {
       });
     });
     return out;
-  }, [transactions, priceHistory, definedFunds]);
+  }, [visTx, priceHistory, definedFunds]);
 
   const handleAddTransaction = (e) => {
     e.preventDefault();
+    const pfId = txPortfolio || (activePf !== 'all' ? activePf : (portfolios[0] && portfolios[0].id));
     const cur = txCurFor(fundCode);
     const rate = cur === 'TRY' ? null : txRate;
     if (txType === 'buy') {
@@ -596,7 +672,7 @@ function App() {
       const priceNative = parseTRNumber(txPrice), amountNative = parseTRNumber(txTotalAmount);
       const priceTL = cur === 'TRY' ? priceNative : priceNative * rate;
       const totalTL = cur === 'TRY' ? amountNative : qty * priceTL;
-      setTransactions((prev) => [...prev, { id: newId(), type: 'buy', fundCode, quantity: qty, price: priceTL, totalAmount: totalTL, currency: cur, rate: cur === 'TRY' ? null : rate, priceNative, amountNative, date: txDate, createdAt: Date.now() }]);
+      setTransactions((prev) => [...prev, { id: newId(), type: 'buy', fundCode, portfolioId: pfId, quantity: qty, price: priceTL, totalAmount: totalTL, currency: cur, rate: cur === 'TRY' ? null : rate, priceNative, amountNative, date: txDate, createdAt: Date.now() }]);
     } else {
       if (!fundCode || !txPrice || !txQty) { showAlert('Eksik Bilgi', 'Lütfen Fon, Satış Fiyatı ve Satılacak Adet alanlarını doldurun.'); return; }
       const qty = parseTRNumber(txQty), prc = parseTRNumber(txPrice);
@@ -607,9 +683,9 @@ function App() {
       const priceTL = cur === 'TRY' ? prc : prc * rate;
       const totalTL = qty * priceTL;
       const amountNative = qty * prc;
-      setTransactions((prev) => [...prev, { id: newId(), type: 'sell', fundCode, quantity: qty, price: priceTL, totalAmount: totalTL, currency: cur, rate: cur === 'TRY' ? null : rate, priceNative: prc, amountNative, date: txDate, createdAt: Date.now() }]);
+      setTransactions((prev) => [...prev, { id: newId(), type: 'sell', fundCode, portfolioId: pfId, quantity: qty, price: priceTL, totalAmount: totalTL, currency: cur, rate: cur === 'TRY' ? null : rate, priceNative: prc, amountNative, stopajRate: stopajInfo && !stopajInfo.incomplete ? stopajInfo.rateUsed : null, stopajTL: stopajInfo && !stopajInfo.incomplete ? stopajInfo.stopajTL : null, netTL: stopajInfo && !stopajInfo.incomplete ? stopajInfo.netTL : null, date: txDate, createdAt: Date.now() }]);
     }
-    setFundCode(''); setTxPrice(''); setTxTotalAmount(''); setTxQty(''); setTxCurOverride(null); setTxRate(null); setTxRateDate(null);
+    setFundCode(''); setTxPrice(''); setTxTotalAmount(''); setTxQty(''); setTxCurOverride(null); setTxRate(null); setTxRateDate(null); setStopajRateOverride(null);
   };
 
   const handleAddDefinedFund = (e) => {
@@ -686,6 +762,58 @@ function App() {
   };
 
   const favSet = useMemo(() => new Set(favorites), [favorites]);
+
+  // ===== Portföy yönetimi =====
+  useEffect(() => { setTxPortfolio(activePf !== 'all' ? activePf : (portfolios[0] ? portfolios[0].id : 'p1')); }, [activePf, portfolios]);
+  const pfName = (id) => (portfolios.find((p) => p.id === id) || {}).name || '';
+  const pfAdd = () => {
+    const id = 'pf' + Date.now().toString(36);
+    setPortfolios((prev) => [...prev, { id, name: 'Yeni Portföy', type: 'bireysel' }]);
+    setActivePf(id); setPfEditing(id); setPfEditName('Yeni Portföy');
+  };
+  const pfSaveName = () => {
+    const nm = pfEditName.trim();
+    if (nm) setPortfolios((prev) => prev.map((p) => p.id === pfEditing ? { ...p, name: nm } : p));
+    setPfEditing(null); setPfEditName('');
+  };
+  const pfSetType = (id, t) => setPortfolios((prev) => prev.map((p) => p.id === id ? { ...p, type: t } : p));
+  const pfDelete = (id) => {
+    const n = transactions.filter((t) => t.portfolioId === id).length;
+    const doDel = () => {
+      setTransactions((prev) => prev.filter((t) => t.portfolioId !== id));
+      setPortfolios((prev) => { const nx = prev.filter((p) => p.id !== id); if (activePf === id) setActivePf(nx.length ? 'all' : 'all'); return nx.length ? nx : [{ id: 'p1', name: 'Bireysel' }]; });
+      setModalConfig({ isOpen: false });
+    };
+    if (portfolios.length <= 1) { showAlert('Silinemez', 'En az bir portföy kalmalı. Silmek için önce yeni bir portföy oluşturun.'); return; }
+    if (n > 0) showConfirm('Portföyü Sil', `"${pfName(id)}" portföyünde ${n} işlem var. Portföyü silersen bu işlemler de SİLİNECEK. Devam edilsin mi?`, doDel);
+    else showConfirm('Portföyü Sil', `"${pfName(id)}" portföyü silinsin mi?`, doDel);
+  };
+  // Portföy seçici (Portföyüm ve Geçmiş Defteri üstünde)
+  const pfSelector = () => (
+    <div className="flex items-center gap-2 flex-wrap mb-6 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm">
+      <span className="text-[11px] font-bold text-slate-400 uppercase px-2">Portföy</span>
+      <button onClick={() => setActivePf('all')} className={`px-3 py-1.5 rounded-lg text-sm font-bold ${activePf === 'all' ? 'bg-[#1E3A5F] text-white' : 'text-slate-600 hover:bg-slate-100'}`}>Tümü</button>
+      {portfolios.map((p) => (
+        <div key={p.id} className={`flex items-center rounded-lg ${activePf === p.id ? 'bg-[#1E3A5F]' : 'hover:bg-slate-100'}`}>
+          {pfEditing === p.id ? (
+            <input autoFocus value={pfEditName} onChange={(e) => setPfEditName(e.target.value)} onBlur={pfSaveName} onKeyDown={(e) => { if (e.key === 'Enter') pfSaveName(); }} className="w-28 px-2 py-1 text-sm rounded-lg border border-indigo-300 outline-none" />
+          ) : (
+            <>
+              <button onClick={() => setActivePf(p.id)} className={`px-3 py-1.5 text-sm font-bold ${activePf === p.id ? 'text-white' : 'text-slate-600'}`}>{p.name}{activePf !== p.id && <span className="ml-1 text-[9px] font-normal opacity-60">{p.type === 'kurumsal' ? 'K' : 'B'}</span>}</button>
+              {activePf === p.id && (
+                <span className="flex items-center pr-1 gap-1">
+                  <button onClick={() => pfSetType(p.id, p.type === 'kurumsal' ? 'bireysel' : 'kurumsal')} title="Bireysel/Kurumsal değiştir" className="text-[10px] font-bold bg-white/15 hover:bg-white/25 text-white px-2 py-0.5 rounded">{p.type === 'kurumsal' ? 'Kurumsal' : 'Bireysel'}</button>
+                  <button onClick={() => { setPfEditing(p.id); setPfEditName(p.name); }} title="Yeniden adlandır" className="text-white/70 hover:text-white p-1"><Edit2 size={13} /></button>
+                  <button onClick={() => pfDelete(p.id)} title="Sil" className="text-white/70 hover:text-white p-1"><Trash2 size={13} /></button>
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      ))}
+      <button onClick={pfAdd} title="Yeni portföy" className="px-2.5 py-1.5 rounded-lg text-sm font-bold text-indigo-600 hover:bg-indigo-50 border border-dashed border-slate-300">＋ Yeni</button>
+    </div>
+  );
   // A kararı: favori işaretlemek fonu aynı zamanda "tanımlı fon" yapar → alış formu bozulmadan çalışır
   const toggleFav = (kod, ad) => {
     setFavorites((prev) => prev.includes(kod) ? prev.filter((c) => c !== kod) : [...prev, kod]);
@@ -1200,23 +1328,23 @@ function App() {
   // GEÇMİŞ DEFTERİ — düz işlem listesi (aktif fonlar üstte, sonra en yeni tarih) + parçalı işaretleme
   const islemListesi = useMemo(() => {
     const net = {};
-    transactions.forEach((t) => { net[t.fundCode] = (net[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
+    visTx.forEach((t) => { net[t.fundCode] = (net[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
     const openCodes = new Set(Object.keys(net).filter((c) => net[c] > 0.000001));
     const key = (t) => t.fundCode + '|' + t.date + '|' + t.type;
     const cnt = {};
-    transactions.forEach((t) => { cnt[key(t)] = (cnt[key(t)] || 0) + 1; });
+    visTx.forEach((t) => { cnt[key(t)] = (cnt[key(t)] || 0) + 1; });
     const nameOf = (c) => (definedFunds.find((d) => d.code === c) || {}).name || '';
-    return transactions
+    return visTx
       .map((t) => ({ ...t, name: nameOf(t.fundCode), open: openCodes.has(t.fundCode), parcali: cnt[key(t)] > 1 }))
       .sort((a, b) => (b.open ? 1 : 0) - (a.open ? 1 : 0) || b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0));
-  }, [transactions, definedFunds]);
+  }, [visTx, definedFunds]);
 
   const eldeKalan = useMemo(() => {
     const net = {};
-    transactions.forEach((t) => { net[t.fundCode] = (net[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
+    visTx.forEach((t) => { net[t.fundCode] = (net[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
     return Object.keys(net).map((c) => ({ code: c, net: net[c], open: net[c] > 0.000001 }))
       .sort((a, b) => (b.open ? 1 : 0) - (a.open ? 1 : 0) || a.code.localeCompare(b.code));
-  }, [transactions]);
+  }, [visTx]);
 
   // Risk-ayarlı getiri için dinamik yorum
   const riskAdjYorum = (d) => {
@@ -1390,6 +1518,7 @@ function App() {
         )}
         {activeTab === 'portfolio' && (
           <>
+          {pfSelector()}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-start gap-3">
               <div className="bg-amber-50 text-amber-600 p-2 rounded-xl mt-0.5"><Database size={18} /></div>
@@ -1413,6 +1542,12 @@ function App() {
                   <button onClick={() => setTxType('sell')} className={`flex-1 py-2 text-sm font-semibold rounded-lg flex justify-center items-center gap-2 ${txType === 'sell' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-500'}`}><ArrowUpFromLine size={16} /> Fon Satış</button>
                 </div>
                 <form onSubmit={handleAddTransaction} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Portföy</label>
+                    <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={txPortfolio || ''} onChange={(e) => setTxPortfolio(e.target.value)}>
+                      {portfolios.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
                   <div>
                     <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fon Seçimi</label>
                     <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={fundCode} onChange={(e) => setFundCode(e.target.value)} required>
@@ -1457,6 +1592,33 @@ function App() {
                         <span className="text-[11px] text-slate-400">Kısmi satış için adedi düşürebilirsiniz.</span>
                       </div>
                       <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Satış Tutarı (Otomatik)</label><div className="w-full border border-slate-200 bg-slate-100 rounded-xl px-4 py-3 font-mono text-slate-600 flex justify-between items-center"><span>{sellAmount == null ? '0,00' : paraSembol(txCurFor(fundCode)) + sellAmount.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span><span className="text-slate-400 text-xs">= Adet × Fiyat</span></div></div>
+                      {stopajInfo && !stopajInfo.incomplete && (() => {
+                        const fmtL = (v) => '₺' + Math.abs(v).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                        const sgn = (v) => (v < 0 ? '-' : '');
+                        return (
+                          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5 text-sm">
+                            <div className="flex items-center justify-between"><span className="text-xs font-bold text-slate-500 uppercase">Vergi Sonrası Net</span><span className="text-[10px] text-slate-400">{stopajInfo.type === 'kurumsal' ? 'Kurumsal' : 'Bireysel'} · {stopajInfo.pp ? 'para piyasası' : 'diğer fon'}</span></div>
+                            <div className="flex justify-between text-slate-600"><span>Brüt satış</span><span className="font-mono">{fmtL(stopajInfo.brutTL)}</span></div>
+                            <div className="flex justify-between text-slate-600"><span>Maliyet</span><span className="font-mono">{fmtL(stopajInfo.maliyetTL)}</span></div>
+                            <div className={`flex justify-between font-semibold ${stopajInfo.kazancTL >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}><span>Kazanç</span><span className="font-mono">{sgn(stopajInfo.kazancTL)}{fmtL(stopajInfo.kazancTL)}</span></div>
+                            {stopajInfo.split && (
+                              <div className="text-[11px] text-slate-400 bg-white rounded-lg p-2 leading-relaxed">
+                                5 Eylül ayrımı: 4 Eylül kapanışı ₺{stopajInfo.split.p4.toLocaleString('tr-TR', { maximumFractionDigits: 6 })} · öncesi {fmtL(stopajInfo.split.preGainTL)} (%0) · sonrası {fmtL(stopajInfo.split.postGainTL)} (%{stopajInfo.rateUsed})
+                              </div>
+                            )}
+                            <div className="flex items-center justify-between">
+                              <span className="text-slate-600 flex items-center gap-1">Stopaj oranı
+                                <input value={stopajRateOverride != null ? stopajRateOverride : ''} onChange={(e) => setStopajRateOverride(e.target.value)} placeholder={String(stopajInfo.autoRate)} inputMode="decimal" className="w-14 px-2 py-0.5 text-xs border border-slate-200 rounded text-right outline-none" />
+                                <span className="text-slate-400">%</span>
+                                {stopajInfo.overridden && <button type="button" onClick={() => setStopajRateOverride(null)} className="text-[10px] text-indigo-600 hover:underline">oto</button>}
+                              </span>
+                              <span className="font-mono text-rose-600">−{fmtL(stopajInfo.stopajTL)}</span>
+                            </div>
+                            <div className="flex justify-between items-center pt-1.5 border-t border-slate-200"><span className="font-bold text-slate-800">Net ele geçen</span><span className="font-mono font-extrabold text-lg text-slate-800">{fmtL(stopajInfo.netTL)}{stopajInfo.cur !== 'TRY' && stopajInfo.rate ? ` · ${paraSembol(stopajInfo.cur)}${(stopajInfo.netTL / stopajInfo.rate).toLocaleString('tr-TR', { maximumFractionDigits: 2 })}` : ''}</span></div>
+                            <div className="text-[10px] text-slate-400">Bilgilendirme; vergi tavsiyesi değildir. Oranı mali müşavirinle teyit et.</div>
+                          </div>
+                        );
+                      })()}
                     </>
                   )}
                   <button type="submit" className={`w-full font-bold py-3.5 px-6 rounded-xl shadow-sm flex justify-center items-center gap-2 mt-4 text-white ${txType === 'buy' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}><PlusCircle size={20} />{txType === 'buy' ? 'Alışı Ekle' : 'Satışı Ekle'}</button>
@@ -1467,7 +1629,7 @@ function App() {
             <div className="w-full lg:w-2/3 flex flex-col gap-6">
               <div className="bg-[#2a2c41] rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between text-white shadow-md">
                 <div className="mb-4 sm:mb-0">
-                  <h2 className="text-xs font-bold text-slate-400 tracking-wider uppercase mb-1">Portföy Toplamı</h2>
+                  <h2 className="text-xs font-bold text-slate-400 tracking-wider uppercase mb-1">Portföy Toplamı · {activePf === 'all' ? 'Tümü' : pfName(activePf)}</h2>
                   <div className="flex items-center gap-6 mt-2">
                     <div><p className="text-xs text-slate-300">Yatırılan</p><p className="font-semibold">{fmtCur(summary.totalCost)}</p></div>
                     <div><p className="text-xs text-slate-300">Güncel Değer</p><p className="font-semibold">{fmtCur(summary.totalValue)}</p></div>
@@ -1581,6 +1743,7 @@ function App() {
           </>
         )}
 
+        {activeTab === 'history' && pfSelector()}
         {(activeTab === 'portfolio' || activeTab === 'history') && (
           <div className="mt-8 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             <div className="p-6 border-b border-slate-100 bg-slate-50/50">
