@@ -390,7 +390,7 @@ function App() {
 
   const portfolio = useMemo(() => {
     const holdings = {};
-    visTx.forEach((t) => {
+    [...visTx].sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0)).forEach((t) => {
       if (!holdings[t.fundCode]) holdings[t.fundCode] = { code: t.fundCode, quantity: 0, totalCost: 0 };
       const h = holdings[t.fundCode];
       const qty = parseFloat(t.quantity), prc = parseFloat(t.price);
@@ -416,12 +416,23 @@ function App() {
   // Satış için: seçili fonun (o portföydeki) ortalama TL maliyeti + ilk alış tarihi
   const sellBasis = useMemo(() => {
     if (!fundCode || !txPortfolio) return null;
-    const buys = transactions.filter((t) => t.fundCode === fundCode && t.portfolioId === txPortfolio && t.type === 'buy');
-    if (!buys.length) return null;
-    const q = buys.reduce((s, t) => s + parseFloat(t.quantity), 0);
-    const cost = buys.reduce((s, t) => s + parseFloat(t.quantity) * parseFloat(t.price), 0);
-    const firstDate = buys.reduce((m, t) => (t.date < m ? t.date : m), buys[0].date);
-    return { avgBuyTL: q > 0 ? cost / q : 0, firstDate };
+    const txs = transactions.filter((t) => t.fundCode === fundCode && t.portfolioId === txPortfolio)
+      .slice().sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+    if (!txs.length) return null;
+    let qty = 0, cost = 0, lotStart = null; // güncel açık lot
+    for (const t of txs) {
+      const q = parseFloat(t.quantity), p = parseFloat(t.price);
+      if (t.type === 'buy') {
+        if (qty <= 1e-9) lotStart = t.date;          // pozisyon sıfırdan açılıyor -> yeni lot
+        qty += q; cost += q * p;
+      } else {                                        // satış: ortalama maliyetten düş
+        const avg = qty > 0 ? cost / qty : 0;
+        qty -= q; cost -= q * avg;
+        if (qty <= 1e-9) { qty = 0; cost = 0; lotStart = null; } // TAM KAPANIŞ -> sıfırla
+      }
+    }
+    if (qty <= 1e-9) return null;                     // açık pozisyon yok
+    return { avgBuyTL: cost / qty, firstDate: lotStart };
   }, [fundCode, txPortfolio, transactions]);
 
   // Satış modunda fon seçilince/moda geçilince adedi elindeki adetle doldur
@@ -537,7 +548,7 @@ function App() {
 
   // ===== Stopaj (vergi) yardımcıları =====
   const isParaPiyasasi = (ad) => { const s = (ad || '').toLocaleUpperCase('tr'); return s.includes('PARA PİYASASI') || s.includes('PARA PIYASASI'); };
-  const pfType = (id) => (portfolios.find((p) => p.id === id) || {}).type || 'bireysel';
+  const pfType = (id) => { const p = portfolios.find((x) => x.id === id); return (p && p.name || '').toLocaleLowerCase('tr').includes('kurumsal') ? 'kurumsal' : 'bireysel'; };
   // Otomatik stopaj oranı: kurumsal+para piyasası %10, kurumsal+diğer %0; bireysel+para piyasası %17,5, bireysel+diğer %10
   const autoStopaj = (ad, type) => { const pp = isParaPiyasasi(ad); return type === 'kurumsal' ? (pp ? 10 : 0) : (pp ? 17.5 : 10); };
   const STOPAJ_TARIH = '2026-09-04'; // kurumsal para piyasası ayrım günü (4 Eylül kapanışı; 5 Eylül'den itibaren %10)
@@ -816,10 +827,10 @@ function App() {
             <input autoFocus value={pfEditName} onChange={(e) => setPfEditName(e.target.value)} onBlur={pfSaveName} onKeyDown={(e) => { if (e.key === 'Enter') pfSaveName(); }} className="w-28 px-2 py-1 text-sm rounded-lg border border-indigo-300 outline-none" />
           ) : (
             <>
-              <button onClick={() => setActivePf(p.id)} className={`px-3 py-1.5 text-sm font-bold ${activePf === p.id ? 'text-white' : 'text-slate-600'}`}>{p.name}{activePf !== p.id && <span className="ml-1 text-[9px] font-normal opacity-60">{p.type === 'kurumsal' ? 'K' : 'B'}</span>}</button>
+              <button onClick={() => setActivePf(p.id)} className={`px-3 py-1.5 text-sm font-bold ${activePf === p.id ? 'text-white' : 'text-slate-600'}`}>{p.name}{activePf !== p.id && <span className="ml-1 text-[9px] font-normal opacity-60">{pfType(p.id) === 'kurumsal' ? 'K' : 'B'}</span>}</button>
               {activePf === p.id && (
                 <span className="flex items-center pr-1 gap-1">
-                  <button onClick={() => pfSetType(p.id, p.type === 'kurumsal' ? 'bireysel' : 'kurumsal')} title="Bireysel/Kurumsal değiştir" className="text-[10px] font-bold bg-white/15 hover:bg-white/25 text-white px-2 py-0.5 rounded">{p.type === 'kurumsal' ? 'Kurumsal' : 'Bireysel'}</button>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${pfType(p.id) === 'kurumsal' ? 'bg-amber-400/30 text-white' : 'bg-white/15 text-white'}`} title="Tip, portföy adından belirlenir (adında 'Kurumsal' geçerse kurumsal)">{pfType(p.id) === 'kurumsal' ? 'Kurumsal' : 'Bireysel'}</span>
                   <button onClick={() => { setPfEditing(p.id); setPfEditName(p.name); }} title="Yeniden adlandır" className="text-white/70 hover:text-white p-1"><Edit2 size={13} /></button>
                   <button onClick={() => pfDelete(p.id)} title="Sil" className="text-white/70 hover:text-white p-1"><Trash2 size={13} /></button>
                 </span>
