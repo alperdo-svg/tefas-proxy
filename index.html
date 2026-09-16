@@ -536,17 +536,17 @@ function App() {
   const paraSembol = (c) => (c === 'USD' ? '$' : c === 'EUR' ? '€' : '₺');
 
   // ===== Stopaj (vergi) yardımcıları =====
-  const isParaPiyasasi = (ad) => (ad || '').toLocaleUpperCase('tr').includes('PARA PİYASASI');
+  const isParaPiyasasi = (ad) => { const s = (ad || '').toLocaleUpperCase('tr'); return s.includes('PARA PİYASASI') || s.includes('PARA PIYASASI'); };
   const pfType = (id) => (portfolios.find((p) => p.id === id) || {}).type || 'bireysel';
   // Otomatik stopaj oranı: kurumsal+para piyasası %10, kurumsal+diğer %0; bireysel+para piyasası %17,5, bireysel+diğer %10
   const autoStopaj = (ad, type) => { const pp = isParaPiyasasi(ad); return type === 'kurumsal' ? (pp ? 10 : 0) : (pp ? 17.5 : 10); };
   const STOPAJ_TARIH = '2026-09-04'; // kurumsal para piyasası ayrım günü (4 Eylül kapanışı; 5 Eylül'den itibaren %10)
-  // Bir fonun belirli tarihe (nearest ≤) ait TL kapanış fiyatı
-  const fiyatAt = (code, dateISO) => {
+  // Bir fonun belirli tarihe (nearest ≤) ait TL kapanış kaydı {date, value}
+  const fiyatEntryAt = (code, dateISO) => {
     const h = priceHistory[code] || []; if (!h.length) return null;
     const s = [...h].filter((x) => x.value > 0).sort((a, b) => a.date.localeCompare(b.date));
     let r = null; for (const x of s) { if (x.date <= dateISO) r = x; else break; }
-    return r ? r.value : null;
+    return r ? { date: r.date, value: r.value } : null;
   };
 
   // Satış anındaki stopaj / net ele geçen hesabı (canlı)
@@ -567,18 +567,22 @@ function App() {
     const oRate = stopajRateOverride != null && stopajRateOverride !== '' ? parseTRNumber(stopajRateOverride) : autoRate;
     const rateUsed = isNaN(oRate) ? autoRate : oRate;
     // 5 Eylül kısmi ayrım: kurumsal + para piyasası + 5 Eylül öncesi alım
-    let taxableTL = Math.max(0, kazancTL); let split = null;
+    let taxableTL = Math.max(0, kazancTL); let split = null; let needP4 = false;
     if (type === 'kurumsal' && pp && sellBasis.firstDate < '2026-09-05') {
-      const p4 = fiyatAt(fundCode, STOPAJ_TARIH);
-      if (p4) {
+      const p4e = fiyatEntryAt(fundCode, STOPAJ_TARIH);
+      const yakin = p4e && ((new Date(STOPAJ_TARIH) - new Date(p4e.date)) / 86400000) <= 7;
+      if (yakin) {
+        const p4 = p4e.value;
         const postGainTL = Math.max(0, (sellTL - p4) * q);   // 5 Eylül sonrası (stopajlı)
         const preGainTL = (p4 - sellBasis.avgBuyTL) * q;      // öncesi (stopajsız)
-        taxableTL = postGainTL; split = { p4, preGainTL, postGainTL };
+        taxableTL = postGainTL; split = { p4, p4date: p4e.date, preGainTL, postGainTL };
+      } else {
+        needP4 = true; // 4 Eylül'e yakın fiyat yok -> ayrım yapılamaz, yanlış hesap yapma
       }
     }
-    const stopajTL = Math.max(0, taxableTL) * rateUsed / 100;
-    const netTL = brutTL - stopajTL;
-    return { cur, rate, sellTL, brutTL, maliyetTL, kazancTL, type, pp, autoRate, rateUsed, taxableTL, stopajTL, netTL, split, overridden: stopajRateOverride != null && stopajRateOverride !== '' };
+    const stopajTL = needP4 ? null : Math.max(0, taxableTL) * rateUsed / 100;
+    const netTL = needP4 ? null : brutTL - stopajTL;
+    return { cur, rate, sellTL, brutTL, maliyetTL, kazancTL, type, pp, autoRate, rateUsed, taxableTL, stopajTL, netTL, split, needP4, overridden: stopajRateOverride != null && stopajRateOverride !== '' };
   }, [txType, fundCode, txPortfolio, txQty, txPrice, txRate, sellBasis, stopajRateOverride, portfolios, priceHistory, txCurOverride]);
 
   // ===== Döviz pozisyonları (dolar/euro bazında) — literatür: taban para birimi döviz, günlük mark-to-market =====
@@ -1602,19 +1606,25 @@ function App() {
                             <div className="flex justify-between text-slate-600"><span>Maliyet</span><span className="font-mono">{fmtL(stopajInfo.maliyetTL)}</span></div>
                             <div className={`flex justify-between font-semibold ${stopajInfo.kazancTL >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}><span>Kazanç</span><span className="font-mono">{sgn(stopajInfo.kazancTL)}{fmtL(stopajInfo.kazancTL)}</span></div>
                             {stopajInfo.split && (
-                              <div className="text-[11px] text-slate-400 bg-white rounded-lg p-2 leading-relaxed">
-                                5 Eylül ayrımı: 4 Eylül kapanışı ₺{stopajInfo.split.p4.toLocaleString('tr-TR', { maximumFractionDigits: 6 })} · öncesi {fmtL(stopajInfo.split.preGainTL)} (%0) · sonrası {fmtL(stopajInfo.split.postGainTL)} (%{stopajInfo.rateUsed})
+                              <div className="text-[11px] text-slate-500 bg-white rounded-lg p-2 leading-relaxed">
+                                <b>5 Eylül ayrımı:</b> 4 Eylül ({stopajInfo.split.p4date}) kapanışı <b>₺{stopajInfo.split.p4.toLocaleString('tr-TR', { maximumFractionDigits: 6 })}</b> · öncesi {fmtL(stopajInfo.split.preGainTL)} (%0) · <b>sonrası {fmtL(stopajInfo.split.postGainTL)} (%{stopajInfo.rateUsed})</b> → vergiye tabi bu kısım
                               </div>
                             )}
-                            <div className="flex items-center justify-between">
-                              <span className="text-slate-600 flex items-center gap-1">Stopaj oranı
-                                <input value={stopajRateOverride != null ? stopajRateOverride : ''} onChange={(e) => setStopajRateOverride(e.target.value)} placeholder={String(stopajInfo.autoRate)} inputMode="decimal" className="w-14 px-2 py-0.5 text-xs border border-slate-200 rounded text-right outline-none" />
-                                <span className="text-slate-400">%</span>
-                                {stopajInfo.overridden && <button type="button" onClick={() => setStopajRateOverride(null)} className="text-[10px] text-indigo-600 hover:underline">oto</button>}
-                              </span>
-                              <span className="font-mono text-rose-600">−{fmtL(stopajInfo.stopajTL)}</span>
-                            </div>
-                            <div className="flex justify-between items-center pt-1.5 border-t border-slate-200"><span className="font-bold text-slate-800">Net ele geçen</span><span className="font-mono font-extrabold text-lg text-slate-800">{fmtL(stopajInfo.netTL)}{stopajInfo.cur !== 'TRY' && stopajInfo.rate ? ` · ${paraSembol(stopajInfo.cur)}${(stopajInfo.netTL / stopajInfo.rate).toLocaleString('tr-TR', { maximumFractionDigits: 2 })}` : ''}</span></div>
+                            {stopajInfo.needP4 ? (
+                              <div className="text-[11px] text-rose-600 bg-rose-50 border border-rose-100 rounded-lg p-2 leading-relaxed">Bu kurumsal para piyasası fonunda <b>4 Eylül 2026 kapanış fiyatı kayıtlı değil</b>; 5 Eylül ayrımı yapılamadığı için stopaj hesaplanamıyor. Portföyüm'deki <b>"TEFAS Canlı Veri Çek"</b> ile fiyat geçmişini güncelle, sonra tekrar dene.</div>
+                            ) : (
+                              <>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-slate-600 flex items-center gap-1">Stopaj oranı
+                                    <input value={stopajRateOverride != null ? stopajRateOverride : ''} onChange={(e) => setStopajRateOverride(e.target.value)} placeholder={String(stopajInfo.autoRate)} inputMode="decimal" className="w-14 px-2 py-0.5 text-xs border border-slate-200 rounded text-right outline-none" />
+                                    <span className="text-slate-400">%</span>
+                                    {stopajInfo.overridden && <button type="button" onClick={() => setStopajRateOverride(null)} className="text-[10px] text-indigo-600 hover:underline">oto</button>}
+                                  </span>
+                                  <span className="font-mono text-rose-600">−{fmtL(stopajInfo.stopajTL)}</span>
+                                </div>
+                                <div className="flex justify-between items-center pt-1.5 border-t border-slate-200"><span className="font-bold text-slate-800">Net ele geçen</span><span className="font-mono font-extrabold text-lg text-slate-800">{fmtL(stopajInfo.netTL)}{stopajInfo.cur !== 'TRY' && stopajInfo.rate ? ` · ${paraSembol(stopajInfo.cur)}${(stopajInfo.netTL / stopajInfo.rate).toLocaleString('tr-TR', { maximumFractionDigits: 2 })}` : ''}</span></div>
+                              </>
+                            )}
                             <div className="text-[10px] text-slate-400">Bilgilendirme; vergi tavsiyesi değildir. Oranı mali müşavirinle teyit et.</div>
                           </div>
                         );
