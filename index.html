@@ -596,6 +596,44 @@ function App() {
     return { cur, rate, sellTL, brutTL, maliyetTL, kazancTL, type, pp, autoRate, rateUsed, taxableTL, stopajTL, netTL, split, needP4, overridden: stopajRateOverride != null && stopajRateOverride !== '' };
   }, [txType, fundCode, txPortfolio, txQty, txPrice, txRate, sellBasis, stopajRateOverride, portfolios, priceHistory, txCurOverride]);
 
+  // Form fon listesi: seçili portföye göre. Satışta sadece o portföyde tutulanlar; alışta portföyün fonları önce.
+  const formFunds = useMemo(() => {
+    const held = {};
+    transactions.filter((t) => t.portfolioId === txPortfolio).forEach((t) => { held[t.fundCode] = (held[t.fundCode] || 0) + (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity)); });
+    const heldCodes = new Set(Object.keys(held).filter((c) => held[c] > 1e-9));
+    if (txType === 'sell') return definedFunds.filter((f) => heldCodes.has(f.code));
+    const inPf = definedFunds.filter((f) => heldCodes.has(f.code));
+    const rest = definedFunds.filter((f) => !heldCodes.has(f.code));
+    return { inPf, rest };
+  }, [transactions, txPortfolio, txType, definedFunds]);
+
+  // Bugün satılsa uygulanacak tahmini stopaj (aktif portföyde) — Net Kâr için
+  const stopajBugun = useMemo(() => {
+    const src = activePf === 'all' ? transactions : transactions.filter((t) => t.portfolioId === activePf);
+    const groups = {};
+    src.forEach((t) => { const k = t.fundCode + '|' + (t.portfolioId || ''); (groups[k] = groups[k] || []).push(t); });
+    let toplamStopaj = 0;
+    Object.entries(groups).forEach(([k, txs]) => {
+      const code = k.split('|')[0], pfId = k.split('|')[1];
+      const sorted = txs.slice().sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+      let qty = 0, cost = 0, lotStart = null;
+      for (const t of sorted) { const q = parseFloat(t.quantity), p = parseFloat(t.price); if (t.type === 'buy') { if (qty <= 1e-9) lotStart = t.date; qty += q; cost += q * p; } else { const avg = qty > 0 ? cost / qty : 0; qty -= q; cost -= q * avg; if (qty <= 1e-9) { qty = 0; cost = 0; lotStart = null; } } }
+      if (qty <= 1e-9) return;
+      const avgBuyTL = cost / qty;
+      const tlToday = marketPrices[code] ? marketPrices[code].value : null;
+      if (tlToday == null) return;
+      const kazanc = (tlToday - avgBuyTL) * qty;
+      const type = pfType(pfId), ad = fonAdiOf(code), pp = isParaPiyasasi(ad), rate = autoStopaj(ad, type);
+      let taxable = Math.max(0, kazanc);
+      if (type === 'kurumsal' && pp && lotStart && lotStart < '2026-09-05') {
+        const p4e = fiyatEntryAt(code, STOPAJ_TARIH);
+        if (p4e && ((new Date(STOPAJ_TARIH) - new Date(p4e.date)) / 86400000) <= 7) taxable = Math.max(0, (tlToday - p4e.value) * qty);
+      }
+      toplamStopaj += Math.max(0, taxable) * rate / 100;
+    });
+    return toplamStopaj;
+  }, [activePf, transactions, marketPrices, portfolios, priceHistory, definedFunds]);
+
   // ===== Döviz pozisyonları (dolar/euro bazında) — literatür: taban para birimi döviz, günlük mark-to-market =====
   const dovizPoz = useMemo(() => {
     const codes = [...new Set(visTx.filter((t) => t.currency && t.currency !== 'TRY').map((t) => t.fundCode))];
@@ -1579,9 +1617,15 @@ function App() {
                   <div>
                     <label className="block text-xs font-bold text-slate-500 mb-1 uppercase">Fon Seçimi</label>
                     <select className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium text-sm" value={fundCode} onChange={(e) => setFundCode(e.target.value)} required>
-                      <option value="">İşlem Yapılacak Fonu Seçiniz...</option>
-                      {definedFunds.map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 30 ? f.name.slice(0, 30) + '...' : f.name}</option>)}
+                      <option value="">{txType === 'sell' ? 'Satılacak Fonu Seçiniz...' : 'İşlem Yapılacak Fonu Seçiniz...'}</option>
+                      {txType === 'sell'
+                        ? (Array.isArray(formFunds) ? formFunds : []).map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 30 ? f.name.slice(0, 30) + '...' : f.name}</option>)
+                        : (<>
+                            {formFunds.inPf && formFunds.inPf.length > 0 && <optgroup label="Bu portföydeki fonlar">{formFunds.inPf.map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 30 ? f.name.slice(0, 30) + '...' : f.name}</option>)}</optgroup>}
+                            {formFunds.rest && formFunds.rest.length > 0 && <optgroup label="Diğer fonlar">{formFunds.rest.map((f) => <option key={f.code} value={f.code}>{f.code} - {f.name.length > 30 ? f.name.slice(0, 30) + '...' : f.name}</option>)}</optgroup>}
+                          </>)}
                     </select>
+                    {txType === 'sell' && Array.isArray(formFunds) && formFunds.length === 0 && <p className="text-[11px] text-amber-600 mt-1">Bu portföyde satılacak fon yok. Önce alış yap ya da portföyü değiştir.</p>}
                   </div>
                   <div><label className="block text-xs font-bold text-slate-500 mb-1 uppercase">İşlem Tarihi</label><input type="date" className="w-full border border-slate-200 bg-slate-50 rounded-xl px-4 py-3 outline-none font-medium" value={txDate} onChange={(e) => setTxDate(e.target.value)} required /></div>
                   {fundCode && (
@@ -1670,8 +1714,9 @@ function App() {
                   </div>
                 </div>
                 <div className="bg-white/10 px-6 py-3 rounded-xl border border-white/10 text-right min-w-[140px]">
-                  <p className="text-xs text-slate-300 uppercase font-bold tracking-wider mb-1">Net Kâr</p>
-                  <p className={`text-xl font-bold ${summary.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{summary.netProfit > 0 ? '+' : ''}{fmtCur(summary.netProfit)}</p>
+                  <p className="text-xs text-slate-300 uppercase font-bold tracking-wider mb-1">Net Kâr <span className="normal-case font-normal text-[10px] text-slate-400">(bugün satılsa)</span></p>
+                  <p className={`text-xl font-bold ${(summary.netProfit - stopajBugun) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{(summary.netProfit - stopajBugun) > 0 ? '+' : ''}{fmtCur(summary.netProfit - stopajBugun)}</p>
+                  {stopajBugun > 0.005 && <p className="text-[10px] text-slate-400 mt-0.5">tahmini stopaj −{fmtCur(stopajBugun)}</p>}
                 </div>
               </div>
 
@@ -1679,11 +1724,11 @@ function App() {
                 {[['Maliyet (Yatırılan)', fmtCur(summary.totalCost), 'Portföydeki toplam anapara', 'bg-slate-300', 'text-slate-800'],
                   ['Güncel Değer', fmtCur(summary.totalValue), 'Anlık piyasa değeri', 'bg-indigo-500', 'text-indigo-700'],
                   ['Brüt Kâr / Zarar', (summary.netProfit > 0 ? '+' : '') + fmtCur(summary.netProfit), 'Kesintiler öncesi kâr', 'bg-amber-400', summary.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'],
-                  ['Net Kâr', (summary.netProfit > 0 ? '+' : '') + fmtCur(summary.netProfit), 'Gerçekleşen net kazanç', 'bg-emerald-500', summary.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600']].map(([t, v, sub, bar, col], i) => (
+                  ['Net Kâr', ((summary.netProfit - stopajBugun) > 0 ? '+' : '') + fmtCur(summary.netProfit - stopajBugun), stopajBugun > 0.005 ? 'Bugün satılsa tahmini stopaj (−' + fmtCur(stopajBugun) + ') sonrası' : 'Bugün satılsa (stopaj yok)', 'bg-emerald-500', (summary.netProfit - stopajBugun) >= 0 ? 'text-emerald-600' : 'text-rose-600']].map(([t, v, sub, bar, col], i) => (
                   <div key={i} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 relative overflow-hidden">
                     <div className={`absolute top-0 left-0 w-1 h-full ${bar}`}></div>
                     <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">{t}</p>
-                    <h3 className={`text-2xl font-bold mb-1 ${col}`}>{v}{i === 3 && <span className={`text-sm font-bold ml-2 ${summary.netProfit >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>({summary.netProfitPercent > 0 ? '+' : ''}{summary.netProfitPercent.toFixed(2)}%)</span>}</h3>
+                    <h3 className={`text-2xl font-bold mb-1 ${col}`}>{v}{i === 3 && (() => { const nk = summary.netProfit - stopajBugun; const p = summary.totalCost > 0 ? (nk / summary.totalCost) * 100 : 0; return <span className={`text-sm font-bold ml-2 ${nk >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>({p > 0 ? '+' : ''}{p.toFixed(2)}%)</span>; })()}</h3>
                     <p className="text-xs text-slate-500">{sub}</p>
                   </div>
                 ))}
