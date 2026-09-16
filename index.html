@@ -764,6 +764,19 @@ function App() {
   const handleDeleteTransaction = (id) => {
     showConfirm('İşlemi Sil', 'Bu işlemi silmek istediğinize emin misiniz? (Fiyat geçmişi etkilenmez.)', () => { setTransactions((prev) => prev.filter((t) => t.id !== id)); setModalConfig({ isOpen: false }); });
   };
+  const moveTx = (id, pfId) => setTransactions((prev) => prev.map((t) => t.id === id ? { ...t, portfolioId: pfId } : t));
+  const moveAllOfFund = (code, pfId) => { if (!pfId) return; setTransactions((prev) => prev.map((t) => t.fundCode === code ? { ...t, portfolioId: pfId } : t)); };
+  // TÜM işlemlerden (portföy filtresiz) fon→portföy dağılımı
+  const fonPortfoyList = useMemo(() => {
+    const map = {};
+    transactions.forEach((t) => {
+      if (!map[t.fundCode]) map[t.fundCode] = { code: t.fundCode, net: 0, pfs: new Set() };
+      map[t.fundCode].net += (t.type === 'buy' ? parseFloat(t.quantity) : -parseFloat(t.quantity));
+      map[t.fundCode].pfs.add(t.portfolioId || (portfolios[0] && portfolios[0].id));
+    });
+    return Object.values(map).map((f) => ({ code: f.code, name: (definedFunds.find((d) => d.code === f.code) || {}).name || '', net: f.net, pf: f.pfs.size === 1 ? [...f.pfs][0] : 'mixed' }))
+      .sort((a, b) => a.code.localeCompare(b.code));
+  }, [transactions, definedFunds, portfolios]);
 
   const favSet = useMemo(() => new Set(favorites), [favorites]);
 
@@ -1796,8 +1809,25 @@ function App() {
                   </div>
                   {histSub === 'islemler' && (
                     <div className="p-4">
+                      {fonPortfoyList.length > 0 && (
+                        <div className="mb-5 border border-indigo-200 rounded-xl p-3 bg-indigo-50/40">
+                          <div className="text-[11px] font-bold text-slate-600 uppercase tracking-wide mb-2">Fon–Portföy Ataması <span className="text-slate-400 normal-case font-normal">(bir fonu seçince tüm işlemleri o portföye taşınır)</span></div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {fonPortfoyList.map((f) => (
+                              <div key={f.code} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                                <span className="font-extrabold text-indigo-700 w-14 shrink-0">{f.code}</span>
+                                <span className="text-[11px] text-slate-400 flex-1 truncate" title={f.name}>{fmtQty(f.net)} adet</span>
+                                <select value={f.pf === 'mixed' ? '' : f.pf} onChange={(e) => moveAllOfFund(f.code, e.target.value)} className={`border rounded-lg px-2 py-1 text-xs outline-none shrink-0 ${f.pf === 'mixed' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-200 bg-slate-50'}`}>
+                                  {f.pf === 'mixed' && <option value="">Karışık — seç</option>}
+                                  {portfolios.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                </select>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       {islemListesi.length === 0 ? (
-                        <div className="p-8 text-center text-slate-400">Henüz işlem yok. Soldan "Alışı Ekle" ile başlayın.</div>
+                        <div className="p-8 text-center text-slate-400">Bu portföyde işlem yok. Yukarıdan fon atayabilir ya da portföy seçiciden <b>"Tümü"</b>ye geçebilirsin.</div>
                       ) : (
                         <>
                           <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-2">Elde kalan</div>
@@ -1809,7 +1839,7 @@ function App() {
                           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
                             <table className="w-full text-left border-collapse text-sm">
                               <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider text-xs border-b border-slate-200">
-                                <tr><th className="p-3">Tarih</th><th className="p-3">Fon</th><th className="p-3">İşlem</th><th className="p-3 text-right">Adet</th><th className="p-3 text-right">Fiyat</th><th className="p-3 text-right">Tutar</th><th className="p-3 text-center"></th></tr>
+                                <tr><th className="p-3">Tarih</th><th className="p-3">Fon</th><th className="p-3">İşlem</th><th className="p-3 text-right">Adet</th><th className="p-3 text-right">Fiyat</th><th className="p-3 text-right">Tutar</th><th className="p-3">Portföy</th><th className="p-3 text-center"></th></tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100">
                                 {islemListesi.map((t) => (
@@ -1820,6 +1850,7 @@ function App() {
                                     <td className="p-3 text-right font-mono text-slate-700">{fmtQty(t.quantity)}</td>
                                     <td className="p-3 text-right font-mono text-slate-600">{fmtPrice(t.price)}</td>
                                     <td className="p-3 text-right font-bold text-slate-800">{fmtCur(t.totalAmount)}</td>
+                                    <td className="p-3"><select value={t.portfolioId || (portfolios[0] && portfolios[0].id)} onChange={(e) => moveTx(t.id, e.target.value)} title="Portföyü değiştir" className="border border-slate-200 bg-slate-50 rounded-lg px-2 py-1 text-xs outline-none">{portfolios.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></td>
                                     <td className="p-3 text-center"><button onClick={() => handleDeleteTransaction(t.id)} title="İşlemi sil" className="text-slate-400 hover:text-rose-600 p-1 hover:bg-rose-50 rounded"><Trash2 size={14} /></button></td>
                                   </tr>
                                 ))}
